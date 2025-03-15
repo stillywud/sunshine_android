@@ -124,38 +124,20 @@ jobject convertMapToJavaHashMap(JNIEnv *env, const std::map<std::string, std::an
 }
 
 
-void passMapToJava(JNIEnv *env, const std::map<std::string, std::any> &cppMap) {
-
-    jobject map = createHashMap(env);
-
-    // Iterate over the C++ map and put entries into the HashMap
-    for (const auto &entry: cppMap) {
-        putValueInJavaHashMap(env, map, entry.first, entry.second);
-    }
-
-    // Call the Java method with the HashMap
-    jclass javaClass = env->FindClass("com/nightmare/sunshine/SunshineServer");
-    jmethodID javaMethod = env->GetStaticMethodID(javaClass, "receiveMap",
-                                                  "(Ljava/util/HashMap;)V");
-    env->CallStaticVoidMethod(javaClass, javaMethod, map);
-
-    // Clean up
-    env->DeleteLocalRef(map);
-    env->DeleteLocalRef(javaClass);
-}
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_start(JNIEnv *env, jclass clazz) {
+Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
     env->GetJavaVM(&jvm);
     g_env = env;
-    jclass localClass = env->FindClass("com/nightmare/sunshine/SunshineServer");
-    if (localClass != nullptr) {
-        sunshineServerClass = (jclass) env->NewGlobalRef(localClass);
-        env->DeleteLocalRef(localClass);
-    } else {
-        BOOST_LOG(error) << "Cannot find SunshineServer class on start"sv;
+    // Use the passed clazz parameter directly instead of looking up the class by name
+    sunshineServerClass = (jclass) env->NewGlobalRef(clazz);
+    if (sunshineServerClass == nullptr) {
+        BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
+        return;
     }
-    deinit = logging::init(1, "/dev/null");
+    deinit = logging::init(0, "/dev/null");
     BOOST_LOG(info) << "Start sunshine server"sv;
+    // log sunshineServerClass
+    BOOST_LOG(info) << "sunshineServerClass: "sv << sunshineServerClass;
     mail::man = std::make_shared<safe::mail_raw_t>();
     task_pool.start(1);
     std::thread httpThread{nvhttp::start};
@@ -164,37 +146,37 @@ Java_com_nightmare_sunshine_SunshineServer_start(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_setSunshineName(JNIEnv *env, jclass clazz,
-                                                           jstring sunshine_name) {
+Java_com_nightmare_sunshine_NativeBridge_setSunshineName(JNIEnv *env, jclass clazz,
+                                                         jstring sunshine_name) {
     const char *str = env->GetStringUTFChars(sunshine_name, nullptr);
     config::nvhttp.sunshine_name = str;
     env->ReleaseStringUTFChars(sunshine_name, str);
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_setPkeyPath(JNIEnv *env, jclass clazz, jstring path) {
+Java_com_nightmare_sunshine_NativeBridge_setPkeyPath(JNIEnv *env, jclass clazz, jstring path) {
     const char *str = env->GetStringUTFChars(path, nullptr);
     config::nvhttp.pkey = str;
     env->ReleaseStringUTFChars(path, str);
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_setCertPath(JNIEnv *env, jclass clazz, jstring path) {
+Java_com_nightmare_sunshine_NativeBridge_setCertPath(JNIEnv *env, jclass clazz, jstring path) {
     const char *str = env->GetStringUTFChars(path, nullptr);
     config::nvhttp.cert = str;
     env->ReleaseStringUTFChars(path, str);
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_setFileStatePath(JNIEnv *env, jclass clazz,
-                                                            jstring path) {
+Java_com_nightmare_sunshine_NativeBridge_setFileStatePath(JNIEnv *env, jclass clazz,
+                                                          jstring path) {
     const char *str = env->GetStringUTFChars(path, nullptr);
     config::nvhttp.file_state = str;
     env->ReleaseStringUTFChars(path, str);
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_submitPin(JNIEnv *env, jclass clazz, jstring pin) {
+Java_com_nightmare_sunshine_NativeBridge_submitPin(JNIEnv *env, jclass clazz, jstring pin) {
     const char *pinStr = env->GetStringUTFChars(pin, nullptr);
     nvhttp::pin(pinStr, "some-moonlight");
     env->ReleaseStringUTFChars(pin, pinStr);
@@ -210,9 +192,9 @@ Java_com_nightmare_sunshine_SunshineServer_cleanup(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_postAudioSample(JNIEnv *env, jclass clazz,
-                                                           jfloatArray audioData,
-                                                           jint sampleCount) {
+Java_com_nightmare_sunshine_NativeBridge_postAudioSample(JNIEnv *env, jclass clazz,
+                                                         jfloatArray audioData,
+                                                         jint sampleCount) {
     // 获取 Java 浮点数组的元素
     jfloat *audioBuffer = env->GetFloatArrayElements(audioData, nullptr);
     if (audioBuffer == nullptr) {
@@ -235,9 +217,9 @@ Java_com_nightmare_sunshine_SunshineServer_postAudioSample(JNIEnv *env, jclass c
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_startAudioRecording(JNIEnv *env, jclass clazz,
-                                                               jobject audioRecord,
-                                                               jint framesPerPacket) {
+Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass clazz,
+                                                             jobject audioRecord,
+                                                             jint framesPerPacket) {
     // 创建 AudioRecord 的全局引用，以便在线程中使用
     jobject globalAudioRecord = env->NewGlobalRef(audioRecord);
     if (globalAudioRecord == nullptr) {
@@ -305,7 +287,7 @@ Java_com_nightmare_sunshine_SunshineServer_startAudioRecording(JNIEnv *env, jcla
 }
 
 JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_SunshineServer_enableH265(JNIEnv *env, jclass clazz) {
+Java_com_nightmare_sunshine_NativeBridge_enableH265(JNIEnv *env, jclass clazz) {
     video::active_hevc_mode = 2;
 }
 
@@ -320,25 +302,33 @@ AMediaFormat *createFormat(const video::config_t &config) {
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, config.width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, config.height);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BIT_RATE, config.bitrate * 1000);
-    // AMEDIAFORMAT_KEY_OPERATING_RATE
+#if __ANDROID_API__ >= 28
+    // AMEDIAFORMAT_KEY_OPERATING_RATE was introduced in API 28 (Android 9)
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_OPERATING_RATE, config.framerate);
-    // AMEDIAFORMAT_KEY_CAPTURE_RATE
+#endif
+#if __ANDROID_API__ >= 28
+    // AMEDIAFORMAT_KEY_CAPTURE_RATE was introduced in API 28 (Android 9)
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_CAPTURE_RATE, config.framerate);
+#endif
     // AMEDIAFORMAT_KEY_FRAME_RATE
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_FRAME_RATE, config.framerate);
     // max-fps-to-encoder
     AMediaFormat_setInt32(format, "max-fps-to-encoder", config.framerate);
-    // AMEDIAFORMAT_KEY_I_FRAME_INTERVAL
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 100000);
-    // AMEDIAFORMAT_KEY_COLOR_FORMAT
-    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, 2130708361); // COLOR_FormatSurface
-    // AMEDIAFORMAT_KEY_LATENCY
+    // COLOR_FormatSurface
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, 2130708361);
+#if __ANDROID_API__ >= 28
+    // AMEDIAFORMAT_KEY_LATENCY was introduced in API 28 (Android 9)
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_LATENCY, 0);
-    // AMEDIAFORMAT_KEY_COMPLEXITY
+#endif
+#if __ANDROID_API__ >= 28
+    // AMEDIAFORMAT_KEY_COMPLEXITY was introduced in API 28 (Android 9)
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COMPLEXITY, 10);
+#endif
     // max-bframes
     AMediaFormat_setInt32(format, "max-bframes", 0);
     if (isHevc) {
+#if __ANDROID_API__ >= 28
         if (colorspace.bit_depth == 10) {
             // HEVCProfileMain10
             AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PROFILE, 2);
@@ -348,13 +338,17 @@ AMediaFormat *createFormat(const video::config_t &config) {
         }
         // HEVCMainTierLevel51
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_LEVEL, 65536);
+#endif
     } else {
+#if __ANDROID_API__ >= 28
         // HIGH profile
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PROFILE, 0x08);
         // AVCLevel42
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_LEVEL, 0x2000);
+#endif
         AMediaFormat_setInt32(format, "vendor.qti-ext-enc-low-latency.enable", 1);
     }
+#if __ANDROID_API__ >= 28
     switch (colorspace.colorspace) {
         case video::colorspace_e::rec601:
             // COLOR_STANDARD_BT601_NTSC
@@ -379,6 +373,7 @@ AMediaFormat *createFormat(const video::config_t &config) {
         // COLOR_TRANSFER_SDR_VIDEO
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_TRANSFER, 3);
     }
+#endif
     return format;
 }
 
@@ -416,57 +411,6 @@ namespace sunshine_callbacks {
     }
 
 
-//    ANativeWindow *creatInputSurfaceWithANativeWindow(const video::config_t &config, video::sunshine_colorspace_t colorspace) {
-//        // Convert config to java HashMap
-//        std::map<std::string, std::any> configMap;
-//        configMap["width"] = config.width;
-//        configMap["height"] = config.height;
-//        configMap["framerate"] = config.framerate;
-//        configMap["bitrate"] = config.bitrate;
-//        configMap["slicesPerFrame"] = config.slicesPerFrame;
-//        configMap["numRefFrames"] = config.numRefFrames;
-//        configMap["encoderCscMode"] = config.encoderCscMode;
-//        configMap["videoFormat"] = config.videoFormat;
-//        configMap["dynamicRange"] = config.dynamicRange;
-//        configMap["chromaSamplingType"] = config.chromaSamplingType;
-//        configMap["enableIntraRefresh"] = config.enableIntraRefresh;
-//        // full_range
-//        configMap["full_range"] = colorspace.full_range ? JNI_TRUE : JNI_FALSE;
-//        // colorspace
-//        int colorstandard = 0;
-//        switch (colorspace.colorspace) {
-//            case video::colorspace_e::rec601:
-//                colorstandard = 4; // COLOR_STANDARD_BT601_NTSC
-//                break;
-//            case video::colorspace_e::rec709:
-//                colorstandard = 1; // COLOR_STANDARD_BT709
-//                break;
-//            case video::colorspace_e::bt2020:
-//            case video::colorspace_e::bt2020sdr:
-//                colorstandard = 6; // COLOR_STANDARD_BT2020
-//                break;
-//        }
-//        configMap["colorstandard"] = colorstandard;
-//        JNIEnv *env;
-//        jint result = jvm->AttachCurrentThread(&env, nullptr);
-//        jobject javaConfig = convertMapToJavaHashMap(env, configMap);
-//        // Call Java method to create Surface
-//        jmethodID javaMethod = env->GetStaticMethodID(sunshineServerClass, "createSurface",
-//                                                      "(Ljava/util/HashMap;)Landroid/view/Surface;");
-//        if (javaMethod == nullptr) {
-//            BOOST_LOG(error) << "Cannot find createSurface method"sv;
-//            env->DeleteLocalRef(javaConfig);
-//            jvm->DetachCurrentThread();
-//            return nullptr;
-//        }
-//        jobject javaSurface = env->CallStaticObjectMethod(sunshineServerClass, javaMethod, javaConfig);
-//        // Convert Java Surface to ANativeWindow
-//        ANativeWindow *window = ANativeWindow_fromSurface(env, javaSurface);
-//
-//        return window;
-//    }
-
-
     void captureVideoLoop(void *channel_data, safe::mail_t mail, const video::config_t &config,
                           const audio::config_t &audioConfig) {
         JNIEnv *env;
@@ -477,89 +421,115 @@ namespace sunshine_callbacks {
         }
         auto shutdown_event = mail->event<bool>(mail::shutdown);
         auto idr_events = mail->event<bool>(mail::idr);
-        // 添加更详细的客户端配置日志
-        BOOST_LOG(info) << "客户端请求视频配置:"sv;
-        BOOST_LOG(info) << "  - 分辨率: "sv << config.width << "x"sv << config.height;
-        BOOST_LOG(info) << "  - 帧率: "sv << config.framerate;
-        BOOST_LOG(info) << "  - 视频格式: "sv << (config.videoFormat == 1 ? "HEVC" : "H.264");
-        BOOST_LOG(info) << "  - 色度采样: "sv << (config.chromaSamplingType == 1 ? "YUV 4:4:4" : "YUV 4:2:0");
-        BOOST_LOG(info) << "  - 动态范围: "sv << (config.dynamicRange ? "HDR" : "SDR");
-        BOOST_LOG(info) << "  - 编码器色彩空间模式: 0x"sv << std::hex << config.encoderCscMode << std::dec;
 
-        // 获取并记录详细的色彩空间信息
+        BOOST_LOG(info) << "Client requested video configuration:";
+        // 分辨率
+        BOOST_LOG(info) << "  - Resolution: " << config.width << "x" << config.height;
+        // 帧率
+        BOOST_LOG(info) << "  - Frame rate: " << config.framerate << " fps";
+        // 视频格式
+        const char *videoFormatStr = "Unknown";
+        if (config.videoFormat == 0) videoFormatStr = "H.264";
+        else if (config.videoFormat == 1) videoFormatStr = "HEVC";
+        else if (config.videoFormat == 2) videoFormatStr = "AV1";
+        BOOST_LOG(info) << "  - Video format: " << videoFormatStr;
+        // 比特率
+        BOOST_LOG(info) << "  - Bitrate: " << config.bitrate << " kbps";
+        // 色度采样
+        BOOST_LOG(info) << "  - Chroma sampling: " << (config.chromaSamplingType == 1 ? "YUV 4:4:4" : "YUV 4:2:0");
+        // 动态范围
+        BOOST_LOG(info) << "  - Dynamic range: " << (config.dynamicRange ? "HDR (10-bit)" : "SDR (8-bit)");
+        // 编码器色彩空间模式
+        BOOST_LOG(info) << "  - Encoder color space mode: 0x" << std::hex << config.encoderCscMode << std::dec;
+        // 每帧切片数
+        BOOST_LOG(info) << "  - Slices per frame: " << config.slicesPerFrame;
+        // Max number of reference frames
+        BOOST_LOG(info) << "  - Number of reference frames: " << config.numRefFrames;
+        BOOST_LOG(info) << "  - Intra refresh: " << (config.enableIntraRefresh ? "Enabled" : "Disabled");
+
+        // Get and log detailed colorspace information
         bool isHdr = false;
         video::sunshine_colorspace_t colorspace = colorspace_from_client_config(config, isHdr);
-        BOOST_LOG(info) << "色彩空间配置:"sv;
-        BOOST_LOG(info) << "  - 色彩空间: "sv << static_cast<int>(colorspace.colorspace);
-        BOOST_LOG(info) << "  - 位深度: "sv << colorspace.bit_depth;
-        BOOST_LOG(info) << "  - 色彩范围: "sv << (colorspace.full_range ? "Full" : "Limited");
+        BOOST_LOG(info) << "Colorspace configuration:";
+        const char *colorspaceStr = "Unknown";
+        if (colorspace.colorspace == video::colorspace_e::rec601) colorspaceStr = "Rec.601";
+        else if (colorspace.colorspace == video::colorspace_e::rec709) colorspaceStr = "Rec.709";
+        else if (colorspace.colorspace == video::colorspace_e::bt2020sdr) colorspaceStr = "BT.2020 SDR";
+        else if (colorspace.colorspace == video::colorspace_e::bt2020) colorspaceStr = "BT.2020 HDR";
+        BOOST_LOG(info) << "  - Colorspace: " << colorspaceStr;
+        BOOST_LOG(info) << "  - Bit depth: " << colorspace.bit_depth << "-bit";
+        BOOST_LOG(info) << "  - Color range: " << (colorspace.full_range ? "Full (0-255)" : "Limited (16-235)");
+        BOOST_LOG(info) << "  - HDR mode: " << (isHdr ? "Enabled" : "Disabled");
 
         AMediaFormat *format = createFormat(config);
-        // 打印最终的媒体格式颜色配置
+#if __ANDROID_API__ >= 28
         int32_t colorStandard = 0, colorRange = 0, colorTransfer = 0;
+
         AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_STANDARD, &colorStandard);
         AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_RANGE, &colorRange);
         AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_TRANSFER, &colorTransfer);
 
-        BOOST_LOG(info) << "最终媒体格式颜色配置:"sv;
+        BOOST_LOG(info) << "Final media format color configuration:"sv;
         BOOST_LOG(info) << "  - COLOR_STANDARD: "sv << colorStandard;
         BOOST_LOG(info) << "  - COLOR_RANGE: "sv << colorRange << (colorRange == 1 ? " (FULL)" : " (LIMITED)");
         BOOST_LOG(info) << "  - COLOR_TRANSFER: "sv << colorTransfer;
+#endif
 
-
-        AMediaCodec *codec = AMediaCodec_createEncoderByType(config.videoFormat == 1 ? "video/hevc" : "video/avc");
+        // Create encoder
+        const char *mimeType = config.videoFormat == 1 ? "video/hevc" : "video/avc";
+        AMediaCodec *codec = AMediaCodec_createEncoderByType(mimeType);
         if (!codec) {
-            BOOST_LOG(error) << "无法创建编码器"sv;
+            BOOST_LOG(error) << "Failed to create encoder";
             AMediaFormat_delete(format);
             return;
         }
 
-        // 配置编码器
-        media_status_t config_status = AMediaCodec_configure(codec, format, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
-        if (config_status != AMEDIA_OK) {
-            std::string errorMsg = "无法配置编码器，错误码: " + std::to_string(config_status);
-            BOOST_LOG(error) << errorMsg;
+        // Configure encoder
+        media_status_t status = AMediaCodec_configure(codec, format, nullptr, nullptr,
+                                                      AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+        if (status != AMEDIA_OK) {
+            BOOST_LOG(error) << "Failed to configure encoder, error code: " << status;
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
             return;
         }
-        // 获取输入 Surface
+
+        // Get input Surface
         ANativeWindow *inputSurface;
-        media_status_t create_surface_status = AMediaCodec_createInputSurface(codec, &inputSurface);
-        if (create_surface_status != AMEDIA_OK) {
-            BOOST_LOG(error) << "无法创建输入Surface，错误码: "sv << create_surface_status;
+        status = AMediaCodec_createInputSurface(codec, &inputSurface);
+        if (status != AMEDIA_OK) {
+            BOOST_LOG(error) << "Failed to create input Surface, error code: " << status;
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
             return;
         }
 
-        // 将 ANativeWindow 转换为 Java Surface 对象
+        // Convert ANativeWindow to Java Surface object
         jobject javaSurface = ANativeWindow_toSurface(env, inputSurface);
         if (javaSurface == nullptr) {
-            BOOST_LOG(error) << "无法将 ANativeWindow 转换为 Surface"sv;
-            jvm->DetachCurrentThread();
+            BOOST_LOG(error) << "Failed to convert ANativeWindow to Surface";
             ANativeWindow_release(inputSurface);
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
+            jvm->DetachCurrentThread();
             return;
         }
 
         bool shouldMute = true;
         if (audioConfig.flags[audio::config_t::HOST_AUDIO]) {
-            BOOST_LOG(info) << "音频配置: 声音将在主机端(Sunshine服务器)播放"sv;
+            BOOST_LOG(info) << "Audio config: Sound will be played on host (Sunshine server)"sv;
             shouldMute = false;
         } else {
-            BOOST_LOG(info) << "音频配置: 声音将在客户端(Moonlight)播放"sv;
+            BOOST_LOG(info) << "Audio config: Sound will be played on client (Moonlight)"sv;
         }
 
-        // 调用 createVirtualDisplay 方法，传递 shouldMute 参数
-        createVirtualDisplay(env, config.width, config.height, 120, audioConfig.packetDuration,
-                             javaSurface, shouldMute);
+        // Create virtual display with audio configuration
+        createVirtualDisplay(env, config.width, config.height, 120, audioConfig.packetDuration, javaSurface, shouldMute);
 
-        // 启动编码器
-        media_status_t status = AMediaCodec_start(codec);
+        // Start encoder
+        status = AMediaCodec_start(codec);
         if (status != AMEDIA_OK) {
-            BOOST_LOG(error) << "无法启动编码器，错误码: "sv << status;
+            BOOST_LOG(error) << "Failed to start encoder, error code: "sv << status;
             env->DeleteLocalRef(javaSurface);
             jvm->DetachCurrentThread();
             ANativeWindow_release(inputSurface);
@@ -568,10 +538,11 @@ namespace sunshine_callbacks {
             return;
         }
 
-        // 编码循环
-        std::vector<uint8_t> codecConfigData;  // 用于存储完整的编解码器配置数据
+        // Initialize variables for encoding loop
+        std::vector<uint8_t> codecConfigData;
         int64_t frameIndex = 0;
 
+        // Encoding loop
         while (!shutdown_event->peek()) {
             bool requested_idr_frame = false;
             if (idr_events->peek()) {
@@ -580,97 +551,78 @@ namespace sunshine_callbacks {
             }
 
             if (requested_idr_frame) {
-                // 使用 Bundle 参数请求同步帧（IDR帧）
+                // Request IDR frame
                 AMediaFormat *params = AMediaFormat_new();
                 AMediaFormat_setInt32(params, "request-sync", 0);
                 media_status_t status = AMediaCodec_setParameters(codec, params);
                 if (status != AMEDIA_OK) {
-                    BOOST_LOG(warning) << "请求 IDR 帧失败，错误码: "sv << status;
+                    BOOST_LOG(warning) << "Failed to request IDR frame, error code: " << status;
                 } else {
-                    BOOST_LOG(info) << "已请求 IDR 帧"sv;
+                    BOOST_LOG(info) << "IDR frame requested";
                 }
                 AMediaFormat_delete(params);
             }
 
-            // 获取输出缓冲区，使用1秒的超时时间
+            // Dequeue output buffer with 1 second timeout
             AMediaCodecBufferInfo bufferInfo;
-            ssize_t outputBufferIndex = AMediaCodec_dequeueOutputBuffer(codec, &bufferInfo,
-                                                                        1000000); // 1秒 = 1000000微秒
+            ssize_t outputBufferIndex = AMediaCodec_dequeueOutputBuffer(codec, &bufferInfo, -1);
 
             if (outputBufferIndex >= 0) {
-                // 获取到有效的输出缓冲区
+                // Valid output buffer received
                 size_t bufferSize = bufferInfo.size;
                 uint8_t *buffer = nullptr;
                 size_t out_size = 0;
 
-                // 获取缓冲区数据
+                // Get buffer data
                 buffer = AMediaCodec_getOutputBuffer(codec, outputBufferIndex, &out_size);
                 if (buffer != nullptr) {
-                    // 处理编码后的数据
                     if (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) {
-                        // 这是编解码器配置数据（SPS/PPS）
-                        BOOST_LOG(info) << "收到编解码器配置数据，大小: "sv << bufferSize;
-
-                        // 直接保存整个配置数据
+                        // Codec configuration data (SPS/PPS)
+                        BOOST_LOG(info) << "Received codec configuration data, size: " << bufferSize;
                         codecConfigData.assign(buffer, buffer + bufferSize);
-                        BOOST_LOG(info) << "保存完整的编解码器配置数据，大小: "sv
-                                        << codecConfigData.size();
+                        BOOST_LOG(info) << "Saved complete codec configuration data, size: " << codecConfigData.size();
                     } else {
-                        // 这是正常的编码帧
-                        bool isKeyFrame =
-                                (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
-                        BOOST_LOG(verbose) << "收到" << (isKeyFrame ? "关键帧" : "普通帧")
-                                           << "，大小: "sv << bufferSize;
+                        // Regular encoded frame
+                        bool isKeyFrame = (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
+                        BOOST_LOG(verbose) << "Received " << (isKeyFrame ? "key frame" : "regular frame") << ", size: " << bufferSize;
                         frameIndex++;
 
                         if (isKeyFrame) {
-                            // 对于关键帧，需要在数据前附加编解码器配置数据
+                            // For key frames, prepend codec configuration data
                             if (!codecConfigData.empty()) {
-                                // 创建包含配置数据和关键帧的完整数据
                                 std::vector<uint8_t> frameData;
-
-                                // 添加配置数据
-                                frameData.insert(frameData.end(), codecConfigData.begin(),
-                                                 codecConfigData.end());
-
-                                // 添加关键帧数据
+                                frameData.insert(frameData.end(), codecConfigData.begin(), codecConfigData.end());
                                 frameData.insert(frameData.end(), buffer, buffer + bufferSize);
-
-                                BOOST_LOG(verbose) << "发送关键帧(带配置数据)，总大小: "sv
-                                                   << frameData.size();
-                                // 发送完整的关键帧数据
-                                stream::postFrame(std::move(frameData), frameIndex, true,
-                                                  channel_data);
+                                BOOST_LOG(verbose) << "Sending key frame (with config data), total size: " << frameData.size();
+                                stream::postFrame(std::move(frameData), frameIndex, true, channel_data);
                             } else {
-                                BOOST_LOG(error) << "没有编解码器配置数据，无法发送完整关键帧"sv;
+                                BOOST_LOG(error) << "No codec configuration data, cannot send complete key frame";
                             }
                         } else {
                             std::vector<uint8_t> frameData;
                             frameData.insert(frameData.end(), buffer, buffer + bufferSize);
-                            stream::postFrame(std::move(frameData), frameIndex, false,
-                                              channel_data);
+                            stream::postFrame(std::move(frameData), frameIndex, false, channel_data);
                         }
                     }
                 }
 
-                // 释放输出缓冲区
+                // Release output buffer
                 AMediaCodec_releaseOutputBuffer(codec, outputBufferIndex, false);
             } else if (outputBufferIndex == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
-                BOOST_LOG(verbose) << "编码器超时，等待输出缓冲区"sv;
+                BOOST_LOG(verbose) << "Encoder timeout, waiting for output buffer";
                 continue;
             } else if (outputBufferIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
-                // 输出格式已更改
+                // Output format changed
                 AMediaFormat *format = AMediaCodec_getOutputFormat(codec);
-                BOOST_LOG(info) << "编码器输出格式已更改"sv;
-                // 可以从format中获取更多信息
+                BOOST_LOG(info) << "Encoder output format changed";
                 AMediaFormat_delete(format);
             } else if (outputBufferIndex == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
-                // 输出缓冲区已更改
-                BOOST_LOG(info) << "编码器输出缓冲区已更改"sv;
+                // Output buffers changed
+                BOOST_LOG(info) << "Encoder output buffers changed";
                 // 在较新的 NDK 版本中，这个事件通常可以忽略，因为 AMediaCodec_getOutputBuffer 会自动处理缓冲区变化
             } else {
-                // 出错
-                BOOST_LOG(error) << "编码器出错，错误码: "sv << outputBufferIndex;
+                // Error
+                BOOST_LOG(error) << "Encoder error, error code: " << outputBufferIndex;
                 break;
             }
         }

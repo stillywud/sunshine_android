@@ -1537,7 +1537,7 @@ namespace input {
     }
 
     // Print the final input packet
-    input::print((void *) payload);
+//    input::print((void *) payload);
 
     // Send the batched input to the OS
     switch (util::endian::little(payload->magic)) {
