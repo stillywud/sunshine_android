@@ -1,0 +1,307 @@
+{
+	"archive" : {},
+	"artifacts" : 
+	[
+		{
+			"path" : "_deps/boost-build/libs/context/libboost_context.a"
+		}
+	],
+	"backtrace" : 1,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_library",
+			"target_compile_definitions",
+			"target_link_libraries"
+		],
+		"files" : 
+		[
+			"/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 197,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 0,
+				"line" : 228,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 0,
+				"line" : 220,
+				"parent" : 0
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 206,
+				"parent" : 0
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 2,
+					"define" : "BOOST_CONTEXT_EXPORT="
+				},
+				{
+					"backtrace" : 3,
+					"define" : "BOOST_CONTEXT_NO_LIB="
+				},
+				{
+					"backtrace" : 3,
+					"define" : "BOOST_CONTEXT_SOURCE="
+				},
+				{
+					"backtrace" : 2,
+					"define" : "BOOST_CONTEXT_STATIC_LINK="
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 0,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/assert/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/config/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/core/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/static_assert/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/throw_exception/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/mp11/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/pool/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/integer/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/type_traits/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/winapi/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/predef/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/smart_ptr/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/move/include"
+				}
+			],
+			"language" : "ASM",
+			"sourceIndexes" : 
+			[
+				0,
+				1,
+				2
+			],
+			"sysroot" : 
+			{
+				"path" : "/Users/lori/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+			}
+		},
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 2,
+					"define" : "BOOST_CONTEXT_EXPORT="
+				},
+				{
+					"backtrace" : 3,
+					"define" : "BOOST_CONTEXT_NO_LIB="
+				},
+				{
+					"backtrace" : 3,
+					"define" : "BOOST_CONTEXT_SOURCE="
+				},
+				{
+					"backtrace" : 2,
+					"define" : "BOOST_CONTEXT_STATIC_LINK="
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 0,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/assert/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/config/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/core/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/static_assert/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/throw_exception/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/mp11/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/pool/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/integer/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/type_traits/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/winapi/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/predef/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/smart_ptr/include"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/move/include"
+				}
+			],
+			"language" : "CXX",
+			"sourceIndexes" : 
+			[
+				3
+			],
+			"sysroot" : 
+			{
+				"path" : "/Users/lori/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+			}
+		}
+	],
+	"folder" : 
+	{
+		"name" : "Dependencies"
+	},
+	"id" : "boost_context::@713694650cfe3e0a28ae",
+	"name" : "boost_context",
+	"nameOnDisk" : "libboost_context.a",
+	"paths" : 
+	{
+		"build" : "_deps/boost-build/libs/context",
+		"source" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "",
+			"sourceIndexes" : 
+			[
+				0,
+				1,
+				2
+			]
+		},
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				3
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/src/asm/make_i386_sysv_elf_gas.S",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/src/asm/jump_i386_sysv_elf_gas.S",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/src/asm/ontop_i386_sysv_elf_gas.S",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/x86/_deps/boost-src/libs/context/src/posix/stack_traits.cpp",
+			"sourceGroupIndex" : 1
+		}
+	],
+	"type" : "STATIC_LIBRARY"
+}

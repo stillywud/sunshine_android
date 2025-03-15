@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "dependencies/Simple-Web-Server",
+		"source" : "dependencies/Simple-Web-Server"
+	}
+}

@@ -1,0 +1,14 @@
+# Target labels
+ openssl
+# Source files and their labels
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/CMakeFiles/openssl
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/CMakeFiles/openssl.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/CMakeFiles/openssl-complete.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-build.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-configure.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-download.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-install.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-mkdir.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-patch.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-test.rule
+/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6r1v2g2y/arm64-v8a/dependencies/openssl-cmake/openssl-prefix/src/openssl-stamp/openssl-update.rule

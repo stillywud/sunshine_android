@@ -1,0 +1,21 @@
+# ninja log v6
+0	12	1742029335059274329	boost-populate-prefix/src/boost-populate-stamp/boost-populate-mkdir	67c95c5d1384008f
+0	12	1742029335059274329	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-mkdir	67c95c5d1384008f
+12	12841	1742029347888586230	boost-populate-prefix/src/boost-populate-stamp/boost-populate-download	954fc4a6a7da4e3a
+12	12841	1742029347888586230	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-download	954fc4a6a7da4e3a
+12841	12853	1742029347901228077	boost-populate-prefix/src/boost-populate-stamp/boost-populate-update	ee49538c31497bd
+12841	12853	1742029347901228077	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-update	ee49538c31497bd
+12853	12866	1742029347914059300	boost-populate-prefix/src/boost-populate-stamp/boost-populate-patch	f30d7b6e68497e66
+12853	12866	1742029347914059300	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-patch	f30d7b6e68497e66
+12866	12880	1742029347927569653	boost-populate-prefix/src/boost-populate-stamp/boost-populate-configure	8ac3c3956ff70bf5
+12866	12880	1742029347927569653	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-configure	8ac3c3956ff70bf5
+12880	12890	1742029347938220943	boost-populate-prefix/src/boost-populate-stamp/boost-populate-build	f753a0d132618428
+12880	12890	1742029347938220943	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-build	f753a0d132618428
+12890	12900	1742029347947882850	boost-populate-prefix/src/boost-populate-stamp/boost-populate-install	d0cbe19f5f5b99a7
+12890	12900	1742029347947882850	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-install	d0cbe19f5f5b99a7
+12900	12910	1742029347958023386	boost-populate-prefix/src/boost-populate-stamp/boost-populate-test	23a3870a00a32831
+12900	12910	1742029347958023386	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-test	23a3870a00a32831
+12910	12925	1742029347972787665	CMakeFiles/boost-populate-complete	c2aaa057e5a18d2e
+12910	12925	1742029347972787665	boost-populate-prefix/src/boost-populate-stamp/boost-populate-done	c2aaa057e5a18d2e
+12910	12925	1742029347972787665	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/CMakeFiles/boost-populate-complete	c2aaa057e5a18d2e
+12910	12925	1742029347972787665	/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/.cxx/Debug/6sy1242v/arm64-v8a/_deps/boost-subbuild/boost-populate-prefix/src/boost-populate-stamp/boost-populate-done	c2aaa057e5a18d2e
