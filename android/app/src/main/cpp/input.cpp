@@ -118,8 +118,11 @@ namespace input {
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
 
   void free_gamepad(platf::input_t &platf_input, int id) {
-//    platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
-//    platf::free_gamepad(platf_input, id);
+// TODO(Lori): Implement this, May Android can support this in the future.
+#ifndef __ANDROID__
+    platf::gamepad_update(platf_input, id, platf::gamepad_state_t {});
+    platf::free_gamepad(platf_input, id);
+#endif
 
     free_id(gamepadMask, id);
   }
@@ -449,7 +452,7 @@ namespace input {
     }
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
-//    platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+    platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
   /**
@@ -554,7 +557,7 @@ namespace input {
       touch_port.env_height
     };
 
-//    platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
+    platf::abs_mouse(platf_input, abs_port, tpcoords->first, tpcoords->second);
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_MOUSE_BUTTON_PACKET packet) {
@@ -593,7 +596,7 @@ namespace input {
           // Already released left button
           return;
         }
-//        platf::button_mouse(platf_input, BUTTON_LEFT, release);
+        platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
         input->mouse_left_button_timeout = nullptr;
@@ -607,15 +610,15 @@ namespace input {
       button == BUTTON_RIGHT && !release &&
       input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY
     ) {
-//      platf::button_mouse(platf_input, BUTTON_RIGHT, false);
-//      platf::button_mouse(platf_input, BUTTON_RIGHT, true);
+      platf::button_mouse(platf_input, BUTTON_RIGHT, false);
+      platf::button_mouse(platf_input, BUTTON_RIGHT, true);
 
       mouse_press[BUTTON_RIGHT] = false;
 
       return;
     }
 
-//    platf::button_mouse(platf_input, button, release);
+    platf::button_mouse(platf_input, button, release);
   }
 
   short map_keycode(short keycode) {
@@ -683,28 +686,28 @@ namespace input {
     if (!release) {
       // Press any synthetic modifiers required for this key
       if (synthetic_modifiers & MODIFIER_SHIFT) {
-//        platf::keyboard_update(platf_input, VKEY_SHIFT, false, flags);
+        platf::keyboard_update(platf_input, VKEY_SHIFT, false, flags);
       }
       if (synthetic_modifiers & MODIFIER_CTRL) {
-//        platf::keyboard_update(platf_input, VKEY_CONTROL, false, flags);
+        platf::keyboard_update(platf_input, VKEY_CONTROL, false, flags);
       }
       if (synthetic_modifiers & MODIFIER_ALT) {
-//        platf::keyboard_update(platf_input, VKEY_MENU, false, flags);
+        platf::keyboard_update(platf_input, VKEY_MENU, false, flags);
       }
     }
 
-//    platf::keyboard_update(platf_input, map_keycode(key_code), release, flags);
+    platf::keyboard_update(platf_input, map_keycode(key_code), release, flags);
 
     if (!release) {
       // Raise any synthetic modifier keys we pressed
       if (synthetic_modifiers & MODIFIER_SHIFT) {
-//        platf::keyboard_update(platf_input, VKEY_SHIFT, true, flags);
+        platf::keyboard_update(platf_input, VKEY_SHIFT, true, flags);
       }
       if (synthetic_modifiers & MODIFIER_CTRL) {
-//        platf::keyboard_update(platf_input, VKEY_CONTROL, true, flags);
+        platf::keyboard_update(platf_input, VKEY_CONTROL, true, flags);
       }
       if (synthetic_modifiers & MODIFIER_ALT) {
-//        platf::keyboard_update(platf_input, VKEY_MENU, true, flags);
+        platf::keyboard_update(platf_input, VKEY_MENU, true, flags);
       }
     }
   }
@@ -787,13 +790,13 @@ namespace input {
     }
 
     if (config::input.high_resolution_scrolling) {
-//      platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
+      platf::scroll(platf_input, util::endian::big(packet->scrollAmt1));
     } else {
       input->accumulated_vscroll_delta += util::endian::big(packet->scrollAmt1);
       auto full_ticks = input->accumulated_vscroll_delta / WHEEL_DELTA;
       if (full_ticks) {
         // Send any full ticks that have accumulated and store the rest
-//        platf::scroll(platf_input, full_ticks * WHEEL_DELTA);
+        platf::scroll(platf_input, full_ticks * WHEEL_DELTA);
         input->accumulated_vscroll_delta -= full_ticks * WHEEL_DELTA;
       }
     }
@@ -810,13 +813,13 @@ namespace input {
     }
 
     if (config::input.high_resolution_scrolling) {
-//      platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
+      platf::hscroll(platf_input, util::endian::big(packet->scrollAmount));
     } else {
       input->accumulated_hscroll_delta += util::endian::big(packet->scrollAmount);
       auto full_ticks = input->accumulated_hscroll_delta / WHEEL_DELTA;
       if (full_ticks) {
         // Send any full ticks that have accumulated and store the rest
-//        platf::hscroll(platf_input, full_ticks * WHEEL_DELTA);
+        platf::hscroll(platf_input, full_ticks * WHEEL_DELTA);
         input->accumulated_hscroll_delta -= full_ticks * WHEEL_DELTA;
       }
     }
@@ -828,7 +831,7 @@ namespace input {
     }
 
     auto size = util::endian::big(packet->header.size) - sizeof(packet->header.magic);
-//    platf::unicode(platf_input, packet->text, size);
+    platf::unicode(platf_input, packet->text, size);
   }
 
   /**
@@ -863,10 +866,10 @@ namespace input {
     }
 
     // Allocate a new gamepad
-//    if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
-//      free_id(gamepadMask, id);
-//      return;
-//    }
+    if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
+      free_id(gamepadMask, id);
+      return;
+    }
 
     input->gamepads[packet->controllerNumber].id = id;
   }
@@ -881,65 +884,65 @@ namespace input {
       return;
     }
 
-      sunshine_callbacks::callJavaOnTouch(packet);
+    sunshine_callbacks::callJavaOnTouch(packet);
 
-//    BOOST_LOG(debug) << "处理触摸事件: 类型=" << (int)packet->eventType << ", 指针ID=" << util::endian::little(packet->pointerId);
-//
-//    // Convert the client normalized coordinates to touchport coordinates
-//    auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
-//    if (!coords) {
-//      BOOST_LOG(warning) << "无法转换触摸坐标，可能是触摸端口未初始化";
-//      return;
-//    }
-//
-//    BOOST_LOG(debug) << "触摸坐标转换: 原始=("
-//                    << from_clamped_netfloat(packet->x, 0.0f, 1.0f) << ","
-//                    << from_clamped_netfloat(packet->y, 0.0f, 1.0f) << ") -> 转换=("
-//                    << coords->first << "," << coords->second << ")";
-//
-//    auto &touch_port = input->touch_port;
-//    platf::touch_port_t abs_port {
-//      touch_port.offset_x,
-//      touch_port.offset_y,
-//      touch_port.env_width,
-//      touch_port.env_height
-//    };
-//
-//    // Renormalize the coordinates
-//    coords->first /= abs_port.width;
-//    coords->second /= abs_port.height;
-//
-//    // Normalize rotation value to 0-359 degree range
-//    auto rotation = util::endian::little(packet->rotation);
-//    if (rotation != LI_ROT_UNKNOWN) {
-//      rotation %= 360;
-//    }
-//
-//    // Normalize the contact area based on the touchport
-//    auto contact_area = scale_client_contact_area(
-//      {from_clamped_netfloat(packet->contactAreaMajor, 0.0f, 1.0f) * 65535.f,
-//       from_clamped_netfloat(packet->contactAreaMinor, 0.0f, 1.0f) * 65535.f},
-//      rotation,
-//      {abs_port.width / 65535.f, abs_port.height / 65535.f}
-//    );
-//
-//    BOOST_LOG(debug) << "触摸区域: 主轴=" << contact_area.first << ", 次轴=" << contact_area.second
-//                    << ", 压力=" << from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f)
-//                    << ", 旋转=" << rotation;
-//
-//    platf::touch_input_t touch {
-//      packet->eventType,
-//      rotation,
-//      util::endian::little(packet->pointerId),
-//      coords->first,
-//      coords->second,
-//      from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
-//      contact_area.first,
-//      contact_area.second,
-//    };
-//
-//    BOOST_LOG(debug) << "准备更新触摸状态: 最终坐标=(" << coords->first << "," << coords->second << ")";
-//    platf::touch_update(input->client_context.get(), abs_port, touch);
+    //   BOOST_LOG(debug) << "处理触摸事件: 类型=" << (int)packet->eventType << ", 指针ID=" << util::endian::little(packet->pointerId);
+    //
+    //   // Convert the client normalized coordinates to touchport coordinates
+    //   auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
+    //   if (!coords) {
+    //     BOOST_LOG(warning) << "无法转换触摸坐标，可能是触摸端口未初始化";
+    //     return;
+    //   }
+    //
+    //   BOOST_LOG(debug) << "触摸坐标转换: 原始=("
+    //                   << from_clamped_netfloat(packet->x, 0.0f, 1.0f) << ","
+    //                   << from_clamped_netfloat(packet->y, 0.0f, 1.0f) << ") -> 转换=("
+    //                   << coords->first << "," << coords->second << ")";
+    //
+    //   auto &touch_port = input->touch_port;
+    //   platf::touch_port_t abs_port {
+    //     touch_port.offset_x,
+    //     touch_port.offset_y,
+    //     touch_port.env_width,
+    //     touch_port.env_height
+    //   };
+    //
+    //   // Renormalize the coordinates
+    //   coords->first /= abs_port.width;
+    //   coords->second /= abs_port.height;
+    //
+    //   // Normalize rotation value to 0-359 degree range
+    //   auto rotation = util::endian::little(packet->rotation);
+    //   if (rotation != LI_ROT_UNKNOWN) {
+    //     rotation %= 360;
+    //   }
+    //
+    //   // Normalize the contact area based on the touchport
+    //   auto contact_area = scale_client_contact_area(
+    //     {from_clamped_netfloat(packet->contactAreaMajor, 0.0f, 1.0f) * 65535.f,
+    //      from_clamped_netfloat(packet->contactAreaMinor, 0.0f, 1.0f) * 65535.f},
+    //     rotation,
+    //     {abs_port.width / 65535.f, abs_port.height / 65535.f}
+    //   );
+    //
+    //   BOOST_LOG(debug) << "触摸区域: 主轴=" << contact_area.first << ", 次轴=" << contact_area.second
+    //                   << ", 压力=" << from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f)
+    //                   << ", 旋转=" << rotation;
+    //
+    //   platf::touch_input_t touch {
+    //     packet->eventType,
+    //     rotation,
+    //     util::endian::little(packet->pointerId),
+    //     coords->first,
+    //     coords->second,
+    //     from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
+    //     contact_area.first,
+    //     contact_area.second,
+    //   };
+    //
+    //   BOOST_LOG(debug) << "准备更新触摸状态: 最终坐标=(" << coords->first << "," << coords->second << ")";
+    //   platf::touch_update(input->client_context.get(), abs_port, touch);
   }
 
   /**
@@ -997,7 +1000,7 @@ namespace input {
       contact_area.second,
     };
 
-//    platf::pen_update(input->client_context.get(), abs_port, pen);
+    platf::pen_update(input->client_context.get(), abs_port, pen);
   }
 
   /**
@@ -1030,7 +1033,7 @@ namespace input {
       from_clamped_netfloat(packet->pressure, 0.0f, 1.0f),
     };
 
-//    platf::gamepad_touch(platf_input, touch);
+    platf::gamepad_touch(platf_input, touch);
   }
 
   /**
@@ -1062,7 +1065,7 @@ namespace input {
       from_netfloat(packet->z),
     };
 
-//    platf::gamepad_motion(platf_input, motion);
+    platf::gamepad_motion(platf_input, motion);
   }
 
   /**
@@ -1092,7 +1095,7 @@ namespace input {
       packet->batteryPercentage
     };
 
-//    platf::gamepad_battery(platf_input, battery);
+    platf::gamepad_battery(platf_input, battery);
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet) {
@@ -1116,10 +1119,10 @@ namespace input {
         return;
       }
 
-//      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
-//        free_id(gamepadMask, id);
-//        return;
-//      }
+      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
+        free_id(gamepadMask, id);
+        return;
+      }
 
       gamepad.id = id;
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
@@ -1181,18 +1184,18 @@ namespace input {
             // Force the back button up
             gamepad.back_button_state = button_state_e::UP;
             state.buttonFlags &= ~platf::BACK;
-//            platf::gamepad_update(platf_input, gamepad.id, state);
+            platf::gamepad_update(platf_input, gamepad.id, state);
 
             // Press Home button
             state.buttonFlags |= platf::HOME;
-//            platf::gamepad_update(platf_input, gamepad.id, state);
+            platf::gamepad_update(platf_input, gamepad.id, state);
 
             // Sleep for a short time to allow the input to be detected
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             // Release Home button
             state.buttonFlags &= ~platf::HOME;
-//            platf::gamepad_update(platf_input, gamepad.id, state);
+            platf::gamepad_update(platf_input, gamepad.id, state);
 
             gamepad.back_timeout_id = nullptr;
           };
@@ -1205,7 +1208,7 @@ namespace input {
       }
     }
 
-//    platf::gamepad_update(platf_input, gamepad.id, gamepad_state);
+    platf::gamepad_update(platf_input, gamepad.id, gamepad_state);
 
     gamepad.gamepad_state = gamepad_state;
   }
@@ -1536,8 +1539,9 @@ namespace input {
       }
     }
 
+    // TODO(Lori)
     // Print the final input packet
-//    input::print((void *) payload);
+    input::print((void *) payload);
 
     // Send the batched input to the OS
     switch (util::endian::little(payload->magic)) {
@@ -1609,7 +1613,7 @@ namespace input {
     task_pool.push([]() {
       for (int x = 0; x < mouse_press.size(); ++x) {
         if (mouse_press[x]) {
-//          platf::button_mouse(platf_input, x, true);
+          platf::button_mouse(platf_input, x, true);
           mouse_press[x] = false;
         }
       }
@@ -1619,7 +1623,7 @@ namespace input {
           // already released
           continue;
         }
-//        platf::keyboard_update(platf_input, vk_from_kpid(kp.first) & 0x00FF, true, flags_from_kpid(kp.first));
+        platf::keyboard_update(platf_input, vk_from_kpid(kp.first) & 0x00FF, true, flags_from_kpid(kp.first));
         key_press[kp.first] = false;
       }
     });
@@ -1628,12 +1632,16 @@ namespace input {
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() override {
-//      platf_input.reset();
+#ifndef __ANDROID__
+      platf_input.reset();
+#endif
     }
   };
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
-//    platf_input = platf::input();
+#ifndef __ANDROID__
+    platf_input = platf::input();
+#endif
 
     return std::make_unique<deinit_t>();
   }
@@ -1657,8 +1665,8 @@ namespace input {
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {
-//      platf::move_mouse(platf_input, 1, 1);
-//      platf::move_mouse(platf_input, -1, -1);
+      platf::move_mouse(platf_input, 1, 1);
+      platf::move_mouse(platf_input, -1, -1);
     },
                           100ms);
 

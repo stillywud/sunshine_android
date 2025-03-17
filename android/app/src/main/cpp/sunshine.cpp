@@ -134,7 +134,7 @@ Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
         BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
         return;
     }
-    deinit = logging::init(0, "/dev/null");
+    deinit = logging::init(1, "/dev/null");
     BOOST_LOG(info) << "Start sunshine server"sv;
     // log sunshineServerClass
     BOOST_LOG(info) << "sunshineServerClass: "sv << sunshineServerClass;
