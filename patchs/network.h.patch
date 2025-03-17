@@ -1,0 +1,9 @@
+--- /Users/lori/Desktop/sunshine/src/network.h	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/network.h	2025-03-16 06:41:13
+@@ -102,4 +102,4 @@
+    * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+    */
+   std::string mdns_instance_name(const std::string_view &hostname);
+-}  // namespace net
++}  // namespace net
+\ No newline at end of file

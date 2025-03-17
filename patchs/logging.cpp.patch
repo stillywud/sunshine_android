@@ -1,0 +1,84 @@
+--- /Users/lori/Desktop/sunshine/src/logging.cpp	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/logging.cpp	2025-03-17 13:29:09
+@@ -15,14 +15,15 @@
+ #include <boost/log/expressions.hpp>
+ #include <boost/log/sinks.hpp>
+ #include <boost/log/sources/severity_logger.hpp>
+-#include <display_device/logging.h>
++// #include <display_device/logging.h>
++#include <android/log.h>
+ 
+ // local includes
+ #include "logging.h"
+ 
+-extern "C" {
+-#include <libavutil/log.h>
+-}
++// extern "C" {
++// #include <libavutil/log.h>
++// }
+ 
+ using namespace std::literals;
+ 
+@@ -86,6 +87,33 @@
+ #endif
+     };
+ 
++#ifdef __ANDROID__
++    android_LogPriority android_priority;
++    switch (log_level) {
++      case 0:
++        android_priority = ANDROID_LOG_VERBOSE;
++        break;
++      case 1:
++        android_priority = ANDROID_LOG_DEBUG;
++        break;
++      case 2:
++        android_priority = ANDROID_LOG_INFO;
++        break;
++      case 3:
++        android_priority = ANDROID_LOG_WARN;
++        break;
++      case 4:
++        android_priority = ANDROID_LOG_ERROR;
++        break;
++      case 5:
++        android_priority = ANDROID_LOG_FATAL;
++        break;
++    };
++    // get log
++    std::string log_message = view.attribute_values()[message].extract<std::string>().get();
++    // input log to andorid
++    __android_log_print(android_priority, "Sunshine", "%s%s", log_type.data(), log_message.c_str());
++#endif
+     auto now = std::chrono::system_clock::now();
+     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+       now - std::chrono::time_point_cast<std::chrono::seconds>(now)
+@@ -104,8 +132,10 @@
+       deinit();
+     }
+ 
++#ifndef __ANDROID__
+     setup_av_logging(min_log_level);
+     setup_libdisplaydevice_logging(min_log_level);
++#endif
+ 
+     sink = boost::make_shared<text_sink>();
+ 
+@@ -124,7 +154,7 @@
+     bl::core::get()->add_sink(sink);
+     return std::make_unique<deinit_t>();
+   }
+-
++#ifndef __ANDROID__
+   void setup_av_logging(int min_log_level) {
+     if (min_log_level >= 1) {
+       av_log_set_level(AV_LOG_QUIET);
+@@ -182,6 +212,7 @@
+       }
+     });
+   }
++#endif
+ 
+   void log_flush() {
+     if (sink) {

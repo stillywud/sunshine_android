@@ -1,0 +1,246 @@
+--- /Users/lori/Desktop/sunshine/src/video.cpp	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/video.cpp	2025-03-17 14:32:14
+@@ -19,13 +19,15 @@
+ }
+ 
+ // local includes
+-#include "cbs.h"
++#ifndef __ANDROID__
++  #include "cbs.h"
++  #include "display_device.h"
++  #include "nvenc/nvenc_base.h"
++#endif
+ #include "config.h"
+-#include "display_device.h"
+ #include "globals.h"
+ #include "input.h"
+ #include "logging.h"
+-#include "nvenc/nvenc_base.h"
+ #include "platform/common.h"
+ #include "sync.h"
+ #include "video.h"
+@@ -41,10 +43,11 @@
+ namespace video {
+ 
+   namespace {
+-    /**
+-     * @brief Check if we can allow probing for the encoders.
+-     * @return True if there should be no issues with the probing, false if we should prevent it.
+-     */
++/**
++ * @brief Check if we can allow probing for the encoders.
++ * @return True if there should be no issues with the probing, false if we should prevent it.
++ */
++#ifndef __ANDROID__
+     bool allow_encoder_probing() {
+       const auto devices {display_device::enumerate_devices()};
+ 
+@@ -69,8 +72,11 @@
+       BOOST_LOG(error) << "No display devices are active at the moment! Cannot probe the encoders.";
+       return false;
+     }
++
++#endif
+   }  // namespace
+ 
++#ifndef __ANDROID__
+   void free_ctx(AVCodecContext *ctx) {
+     avcodec_free_context(&ctx);
+   }
+@@ -83,6 +89,8 @@
+     av_buffer_unref(&ref);
+   }
+ 
++#endif
++
+   namespace nv {
+ 
+     enum class profile_h264_e : int {
+@@ -301,6 +309,8 @@
+     YUV444_SUPPORT = 1 << 10,  ///< Encoder may support 4:4:4 chroma sampling depending on hardware
+     ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread
+   };
++
++#ifndef __ANDROID__
+ 
+   class avcodec_encode_session_t: public encode_session_t {
+   public:
+@@ -467,6 +477,8 @@
+   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);
+   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);
+ 
++#endif
++
+ #ifdef _WIN32
+   encoder_t nvenc {
+     "nvenc"sv,
+@@ -506,7 +518,7 @@
+     },
+     PARALLEL_ENCODING | REF_FRAMES_INVALIDATION | YUV444_SUPPORT | ASYNC_TEARDOWN  // flags
+   };
+-#elif !defined(__APPLE__)
++#elif !defined(__APPLE__) && !defined(__ANDROID__)
+   encoder_t nvenc {
+     "nvenc"sv,
+     std::make_unique<encoder_platform_formats_avcodec>(
+@@ -804,6 +816,7 @@
+   };
+ #endif
+ 
++#ifndef __ANDROID__
+   encoder_t software {
+     "software"sv,
+     std::make_unique<encoder_platform_formats_avcodec>(
+@@ -831,14 +844,14 @@
+       {},  // YUV444 HDR-specific options
+       {},  // Fallback options
+ 
+-#ifdef ENABLE_BROKEN_AV1_ENCODER
++  #ifdef ENABLE_BROKEN_AV1_ENCODER
+            // Due to bugs preventing on-demand IDR frames from working and very poor
+            // real-time encoding performance, we do not enable libsvtav1 by default.
+            // It is only suitable for testing AV1 until the IDR frame issue is fixed.
+       "libsvtav1"s,
+-#else
++  #else
+       {},
+-#endif
++  #endif
+     },
+     {
+       // x265's Info SEI is so long that it causes the IDR picture data to be
+@@ -874,7 +887,7 @@
+     H264_ONLY | PARALLEL_ENCODING | ALWAYS_REPROBE | YUV444_SUPPORT
+   };
+ 
+-#ifdef __linux__
++  #ifdef __linux__
+   encoder_t vaapi {
+     "vaapi"sv,
+     std::make_unique<encoder_platform_formats_avcodec>(
+@@ -931,8 +944,8 @@
+     // RC buffer size will be set in platform code if supported
+     LIMITED_GOP_SIZE | PARALLEL_ENCODING | NO_RC_BUF_LIMIT
+   };
++  #endif
+ #endif
+-
+ #ifdef __APPLE__
+   encoder_t videotoolbox {
+     "videotoolbox"sv,
+@@ -1001,23 +1014,23 @@
+   };
+ #endif
+ 
++#ifndef __ANDROID__
+   static const std::vector<encoder_t *> encoders {
+-#ifndef __APPLE__
++  #ifndef __APPLE__
+     &nvenc,
+-#endif
+-#ifdef _WIN32
++  #endif
++  #ifdef _WIN32
+     &quicksync,
+     &amdvce,
+-#endif
+-#ifdef __linux__
++  #endif
++  #ifdef __linux__
+     &vaapi,
+-#endif
+-#ifdef __APPLE__
++  #endif
++  #ifdef __APPLE__
+     &videotoolbox,
+-#endif
++  #endif
+     &software
+   };
+-
+   static encoder_t *chosen_encoder;
+   int active_hevc_mode;
+   int active_av1_mode;
+@@ -1713,11 +1726,11 @@
+         } else {
+           ctx->rc_buffer_size = bitrate / config.framerate;
+ 
+-#ifndef __APPLE__
++  #ifndef __APPLE__
+           if (encoder.name == "nvenc" && config::video.nv_legacy.vbv_percentage_increase > 0) {
+             ctx->rc_buffer_size += ctx->rc_buffer_size * config::video.nv_legacy.vbv_percentage_increase / 100;
+           }
+-#endif
++  #endif
+         }
+       }
+ 
+@@ -2558,9 +2571,7 @@
+ 
+         // Test 4:4:4 HDR first. If 4:4:4 is supported, 4:2:0 should also be supported.
+         config.chromaSamplingType = 1;
+-        if ((encoder.flags & YUV444_SUPPORT) &&
+-            disp->is_codec_supported(encoder_codec_name, config) &&
+-            validate_config(disp, encoder, config) >= 0) {
++        if ((encoder.flags & YUV444_SUPPORT) && disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
+           flag_map[encoder_t::DYNAMIC_RANGE] = true;
+           flag_map[encoder_t::YUV444] = true;
+           return;
+@@ -2570,8 +2581,7 @@
+ 
+         // Test 4:2:0 HDR
+         config.chromaSamplingType = 0;
+-        if (disp->is_codec_supported(encoder_codec_name, config) &&
+-            validate_config(disp, encoder, config) >= 0) {
++        if (disp->is_codec_supported(encoder_codec_name, config) && validate_config(disp, encoder, config) >= 0) {
+           flag_map[encoder_t::DYNAMIC_RANGE] = true;
+         } else {
+           flag_map[encoder_t::DYNAMIC_RANGE] = false;
+@@ -2679,15 +2689,13 @@
+         }
+ 
+         // Skip it if it doesn't support the specified codec at all
+-        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) ||
+-            (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
++        if ((active_hevc_mode >= 2 && !encoder->hevc[encoder_t::PASSED]) || (active_av1_mode >= 2 && !encoder->av1[encoder_t::PASSED])) {
+           pos++;
+           continue;
+         }
+ 
+         // Skip it if it doesn't support HDR on the specified codec
+-        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) ||
+-            (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
++        if ((active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) || (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE])) {
+           pos++;
+           continue;
+         }
+@@ -2842,7 +2850,7 @@
+     return hw_device_buf;
+   }
+ 
+-#ifdef _WIN32
++  #ifdef _WIN32
+ }
+ 
+ void do_nothing(void *) {
+@@ -2874,7 +2882,7 @@
+ 
+     return ctx_buf;
+   }
+-#endif
++  #endif
+ 
+   int start_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
+     capture_thread_ctx.encoder_p = chosen_encoder;
+@@ -2946,5 +2954,10 @@
+ 
+     return platf::pix_fmt_e::unknown;
+   }
+-
++}
++#endif
++int active_hevc_mode = config::video.hevc_mode;
++int active_av1_mode = config::video.av1_mode;
++bool last_encoder_probe_supported_ref_frames_invalidation = false;
++std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};  // 0 - H.264, 1 - HEVC, 2 - AV1
+ }  // namespace video

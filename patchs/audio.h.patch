@@ -1,0 +1,10 @@
+--- /Users/lori/Desktop/sunshine/src/audio.h	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/audio.h	2025-03-17 12:03:07
+@@ -100,4 +100,7 @@
+    * @examples_end
+    */
+   bool is_audio_ctx_sink_available(const audio_ctx_t &ctx);
++
++  using sample_queue_t = std::shared_ptr<safe::queue_t<std::vector<float>>>;
++  void encodeThread(sample_queue_t samples, config_t config, void *channel_data);
+ }  // namespace audio

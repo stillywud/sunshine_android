@@ -1,0 +1,10 @@
+--- /Users/lori/Desktop/sunshine/src/audio.cpp	2025-03-17 11:48:15
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/audio.cpp	2025-03-17 12:02:29
+@@ -272,6 +272,7 @@
+   }
+ 
+   int start_audio_control(audio_ctx_t &ctx) {
++    return 0;
+     auto fg = util::fail_guard([]() {
+       BOOST_LOG(warning) << "There will be no audio"sv;
+     });

@@ -1,0 +1,233 @@
+--- /Users/lori/Desktop/sunshine/src/stream.cpp	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/stream.cpp	2025-03-16 06:41:13
+@@ -15,24 +15,25 @@
+ extern "C" {
+   // clang-format off
+ #include <moonlight-common-c/src/Limelight-internal.h>
+-#include "rswrapper.h"
++//#include "rswrapper.h"
+   // clang-format on
+ }
+ 
+ // local includes
+ #include "config.h"
+-#include "display_device.h"
++//#include "display_device.h"
+ #include "globals.h"
+ #include "input.h"
+ #include "logging.h"
+ #include "network.h"
+ #include "platform/common.h"
+-#include "process.h"
++//#include "process.h"
+ #include "stream.h"
+ #include "sync.h"
+ #include "system_tray.h"
+ #include "thread_safe.h"
+ #include "utility.h"
++#include "sunshine.h"
+ 
+ #define IDX_START_A 0
+ #define IDX_START_B 1
+\ No newline at end of file
+@@ -495,7 +496,7 @@
+       }
+ 
+       // Once the control stream connection is established, RTSP session state can be torn down
+-      rtsp_stream::launch_session_clear(session_p->launch_session_id);
++//      rtsp_stream::launch_session_clear(session_p->launch_session_id);
+ 
+       session_p->control.peer = peer;
+ 
+\ No newline at end of file
+@@ -586,10 +587,14 @@
+   }
+ 
+   namespace fec {
+-    using rs_t = util::safe_ptr<reed_solomon, [](reed_solomon *rs) {
+-      reed_solomon_release(rs);
+-    }>;
++      // 定义一个删除器函数
++      void rs_deleter(reed_solomon *rs) {
++          reed_solomon_release(rs);
++      }
+ 
++      // 使用函数指针而不是lambda
++      using rs_t = util::safe_ptr<reed_solomon, rs_deleter>;
++
+     struct fec_t {
+       size_t data_shards;
+       size_t nr_shards;
+\ No newline at end of file
+@@ -1093,14 +1098,16 @@
+       }
+ 
+       // Don't break until any pending sessions either expire or connect
+-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
+-        BOOST_LOG(info) << "Process terminated"sv;
+-        break;
+-      }
++//      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
++//        BOOST_LOG(info) << "Process terminated"sv;
++//        break;
++//      }
+ 
+       server->iterate(150ms);
+     }
+ 
++  BOOST_LOG(debug) << "control loop end"sv;
++
+     // Let all remaining connections know the server is shutting down
+     // reason: graceful termination
+     std::uint32_t reason = 0x80030023;
+\ No newline at end of file
+@@ -1795,10 +1802,11 @@
+     return -1;
+   }
+ 
++    safe::mail_raw_t::queue_t<video::packet_t> currentSessionVideoQueue;
+   void videoThread(session_t *session) {
+-    auto fg = util::fail_guard([&]() {
+-      session::stop(*session);
+-    });
++//    auto fg = util::fail_guard([&]() {
++//      session::stop(*session);
++//    });
+ 
+     while_starting_do_nothing(session->state);
+ 
+\ No newline at end of file
+@@ -1812,14 +1820,28 @@
+     auto address = session->video.peer.address();
+     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+ 
++      currentSessionVideoQueue = mail::man->queue<video::packet_t>(mail::video_packets);
+     BOOST_LOG(debug) << "Start capturing Video"sv;
+-    video::capture(session->mail, session->config.monitor, session);
++    sunshine_callbacks::captureVideoLoop(session, session->mail, session->config.monitor, session->config.audio);
++//    video::capture(session->mail, session->config.monitor, session);
+   }
+ 
++    void postFrame(std::vector<uint8_t> &&frame_data, int64_t frame_index, bool idr, void* channel_data)  {
++        if(currentSessionVideoQueue) {
++            auto packet = std::make_unique<video::packet_raw_generic>(
++                    std::move(frame_data),
++                    frame_index,
++                    idr
++            );
++            packet->channel_data = channel_data;
++            currentSessionVideoQueue->raise(std::move(packet));
++        }
++    }
++
+   void audioThread(session_t *session) {
+-    auto fg = util::fail_guard([&]() {
+-      session::stop(*session);
+-    });
++//    auto fg = util::fail_guard([&]() {
++//      session::stop(*session);
++//    });
+ 
+     while_starting_do_nothing(session->state);
+ 
+\ No newline at end of file
+@@ -1828,13 +1850,14 @@
+     if (error < 0) {
+       return;
+     }
+-
+-    // Enable local prioritization and QoS tagging on audio traffic if requested by the client
+-    auto address = session->audio.peer.address();
+-    session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+-
++//
++//    // Enable local prioritization and QoS tagging on audio traffic if requested by the client
++//    auto address = session->audio.peer.address();
++//    session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
++//
+     BOOST_LOG(debug) << "Start capturing Audio"sv;
+-    audio::capture(session->mail, session->config.audio, session);
++      sunshine_callbacks::captureAudioLoop(session, session->mail, session->config.audio);
++//    audio::capture(session->mail, session->config.audio, session);
+   }
+ 
+   namespace session {
+\ No newline at end of file
+@@ -1862,7 +1885,7 @@
+       auto task = []() {
+         BOOST_LOG(fatal) << "Hang detected! Session failed to terminate in 10 seconds."sv;
+         logging::log_flush();
+-        lifetime::debug_trap();
++//        lifetime::debug_trap();
+       };
+       auto force_kill = task_pool.pushDelayed(task, 10s).task_id;
+       auto fg = util::fail_guard([&force_kill]() {
+\ No newline at end of file
+@@ -1878,27 +1901,21 @@
+       session.controlEnd.view();
+       // Reset input on session stop to avoid stuck repeated keys
+       BOOST_LOG(debug) << "Resetting Input..."sv;
+-      input::reset(session.input);
++//      input::reset(session.input);
+ 
+       // If this is the last session, invoke the platform callbacks
+-      if (--running_sessions == 0) {
+-        bool revert_display_config {config::video.dd.config_revert_on_disconnect};
+-        if (proc::proc.running()) {
+-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+-          system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
+-#endif
+-        } else {
+-          // We have no app running and also no clients anymore.
+-          revert_display_config = true;
+-        }
++//      if (--running_sessions == 0) {
++//        if (proc::proc.running()) {
++//#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
++//          system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
++//#endif
++//        } else {
++//          display_device::revert_configuration();
++//        }
++//
++//        platf::streaming_will_stop();
++//      }
+ 
+-        if (revert_display_config) {
+-          display_device::revert_configuration();
+-        }
+-
+-        platf::streaming_will_stop();
+-      }
+-
+       BOOST_LOG(debug) << "Session ended"sv;
+     }
+ 
+\ No newline at end of file
+@@ -1934,12 +1951,12 @@
+       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+ 
+       // If this is the first session, invoke the platform callbacks
+-      if (++running_sessions == 1) {
+-        platf::streaming_will_start();
+-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+-        system_tray::update_tray_playing(proc::proc.get_last_run_app_name());
+-#endif
+-      }
++//      if (++running_sessions == 1) {
++//        platf::streaming_will_start();
++//#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
++//        system_tray::update_tray_playing(proc::proc.get_last_run_app_name());
++//#endif
++//      }
+ 
+       return 0;
+     }
+\ No newline at end of file
+@@ -2016,4 +2033,4 @@
+       return session;
+     }
+   }  // namespace session
+-}  // namespace stream
++}  // namespace stream
+\ No newline at end of file

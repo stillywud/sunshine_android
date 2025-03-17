@@ -1,0 +1,45 @@
+--- /Users/lori/Desktop/sunshine/src/config.cpp	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/config.cpp	2025-03-17 12:38:27
+@@ -33,10 +33,16 @@
+ #endif
+ 
+ #ifndef __APPLE__
+-  // For NVENC legacy constants
+-  #include <ffnvcodec/nvEncodeAPI.h>
++  #ifndef __ANDROID__
++    // For NVENC legacy constants
++    #include <ffnvcodec/nvEncodeAPI.h>
++  #endif
+ #endif
+ 
++#ifdef __ANDROID__
++  #define SUNSHINE_ASSETS_DIR "/assets"
++#endif
++
+ namespace fs = std::filesystem;
+ using namespace std::literals;
+ 
+@@ -442,6 +448,7 @@
+   video_t video {
+     28,  // qp
+ 
++    // TODO 这里 taowen 将 两个值都改成了1，不知道什么用意
+     0,  // hevc_mode
+     0,  // av1_mode
+ 
+@@ -1067,6 +1074,7 @@
+     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
+ 
+ #ifndef __APPLE__
++  #ifndef __ANDROID__
+     video.nv_legacy.preset = video.nv.quality_preset + 11;
+     video.nv_legacy.multipass = video.nv.two_pass == nvenc::nvenc_two_pass::quarter_resolution ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION :
+                                 video.nv.two_pass == nvenc::nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
+@@ -1074,6 +1082,7 @@
+     video.nv_legacy.h264_coder = video.nv.h264_cavlc ? NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC : NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
+     video.nv_legacy.aq = video.nv.adaptive_quantization;
+     video.nv_legacy.vbv_percentage_increase = video.nv.vbv_percentage_increase;
++  #endif
+ #endif
+ 
+     int_f(vars, "qsv_preset", video.qsv.qsv_preset, qsv::preset_from_view);

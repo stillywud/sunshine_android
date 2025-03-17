@@ -1,0 +1,38 @@
+--- /Users/lori/Desktop/sunshine/src/rtsp.cpp	2025-03-17 11:18:59
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/rtsp.cpp	2025-03-16 06:41:13
+@@ -1056,7 +1056,8 @@
+     auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());
+     if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY &&
+         (config.encryptionFlagsEnabled & (SS_ENC_VIDEO | SS_ENC_AUDIO)) != (SS_ENC_VIDEO | SS_ENC_AUDIO)) {
+-      BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
++      BOOST_LOG(error) << "Rejecting client that cannot comply with manda"
++                          "tory encryption requirement"sv;
+ 
+       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+       return;
+\ No newline at end of file
+@@ -1109,12 +1110,12 @@
+     while (!shutdown_event->peek()) {
+       server.iterate(std::min(500ms, config::stream.ping_timeout));
+ 
+-      if (broadcast_shutdown_event->peek()) {
+-        server.clear();
+-      } else {
++//      if (broadcast_shutdown_event->peek()) {
++//        server.clear();
++//      } else {
+         // cleanup all stopped sessions
+         server.clear(false);
+-      }
++//      }
+     }
+ 
+     server.clear();
+\ No newline at end of file
+@@ -1162,4 +1163,4 @@
+                      << messageBuffer << std::endl
+                      << "---End MessageBuffer---"sv << std::endl;
+   }
+-}  // namespace rtsp_stream
++}  // namespace rtsp_stream
+\ No newline at end of file

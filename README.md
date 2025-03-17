@@ -91,3 +91,44 @@
 2025-03-16 06:05:29.802  8206-8325  Sunshine                com.nightmare.sunshine_android       I  Info:   - Bit depth: 8-bit
 2025-03-16 06:05:29.802  8206-8325  Sunshine                com.nightmare.sunshine_android       I  Info:   - Color range: Limited (16-235)
 2025-03-16 06:05:29.802  8206-8325  Sunshine                com.nightmare.sunshine_android       I  Info:   - HDR mode: Disabled
+
+如果要合并到 Sunshine ，还有一些问题，目前 Sunshine For Android 需要一个 app 作为宿主程序
+
+通过找个 App 申请录屏权限，从而将关键的数据传递到 C/C++
+
+及时在将来的 ADB Mode，仍然需要一些 Java 代码
+
+如果是这样的话，在 platform 新建一个 android 文件夹有点奇怪，因为这个文件夹内，不仅是安卓需要的 jni 代码，还需要整个 Android App 工程，所以你有没有好的想法来解决工程结构上的一些问题呢
+ 
+
+
+
+
+
+
+
+其中加上宏的判断可以合并到上游分支，但需经过一些测试
+
+并为每个改动的文件生成了 diff 文件，方便合并到上游分支
+
+
+input 中关键的没改完
+
+
+
+
+## 优化整个移植工作
+尽可能的使用 #ifdef __ANDROID__ 来保证功能的正常运行，而不是注释掉代码
+相比于原作者的移植，我减少了大量的 diff
+- 优化代码的格式化以减少 diff
+- 尽量保证最小的 diff 文件，方便合并到上游分支
+- 生成 patch 文件，以合并到上游分支
+
+在第一个阶段，我觉得可以以这样的方式来合并到上游分支
+
+在 pltform 文件夹创建 android 文件夹，我在里面编写所有的 jni 代码，但是这里并不会有完整的 Android 工程
+
+
+我认为这是一个改动量比较大的工作，我喜爱那个分几次合并
+
+首先，我先 fork Sunshine 的仓库，将一些少量改动的代码提交到上游分支，我直接提交 PR
