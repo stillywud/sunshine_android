@@ -1,0 +1,3 @@
+[submodule "android/sunshine"]
+	path = android/sunshine
+	url = https://github.com/nightmare-space/Sunshine.git
