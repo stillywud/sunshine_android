@@ -1,4 +1,4 @@
---- /Users/lori/Desktop/sunshine/src/video.cpp	2025-03-17 11:18:59
+--- android/sunshine/src/video.cpp	2025-03-18 12:40:58
 +++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/video.cpp	2025-03-17 14:32:14
 @@ -19,13 +19,15 @@
  }

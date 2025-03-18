@@ -1,4 +1,4 @@
---- /Users/lori/Desktop/sunshine/src/rtsp.cpp	2025-03-17 11:18:59
+--- android/sunshine/src/rtsp.cpp	2025-03-18 12:40:58
 +++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/rtsp.cpp	2025-03-16 06:41:13
 @@ -1056,7 +1056,8 @@
      auto encryption_mode = net::encryption_mode_for_address(sock.remote_endpoint().address());

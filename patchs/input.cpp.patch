@@ -1,5 +1,5 @@
---- /Users/lori/Desktop/sunshine/src/input.cpp	2025-03-17 11:18:59
-+++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/input.cpp	2025-03-17 14:37:15
+--- android/sunshine/src/input.cpp	2025-03-18 12:40:58
++++ /Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp/input.cpp	2025-03-17 16:56:25
 @@ -33,6 +33,8 @@
    #define WHEEL_DELTA 120
  #endif
@@ -21,15 +21,15 @@
  
      free_id(gamepadMask, id);
    }
-@@ -398,7 +403,7 @@
-         print((PNV_REL_MOUSE_MOVE_PACKET) payload);
+@@ -395,7 +400,7 @@
+ 
+     switch (util::endian::little(header->magic)) {
+       case MOUSE_MOVE_REL_MAGIC_GEN5:
+-        print((PNV_REL_MOUSE_MOVE_PACKET) payload);
++        // print((PNV_REL_MOUSE_MOVE_PACKET) payload);
          break;
        case MOUSE_MOVE_ABS_MAGIC:
--        print((PNV_ABS_MOUSE_MOVE_PACKET) payload);
-+        // print((PNV_ABS_MOUSE_MOVE_PACKET) payload);
-         break;
-       case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
-       case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+         print((PNV_ABS_MOUSE_MOVE_PACKET) payload);
 @@ -879,50 +884,65 @@
        return;
      }

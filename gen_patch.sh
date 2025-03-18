@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # 定义原始文件和修改后的文件路径
-BACKUP_DIR="/Users/lori/Desktop/sunshine/src"
+BACKUP_DIR="android/sunshine/src"
 MODIFIED_DIR="/Users/lori/Desktop/nightmare-space/sunshine_android/android/app/src/main/cpp"
-PATCH_DIR="/Users/lori/Desktop/nightmare-space/sunshine_android/patchs"
+PATCH_DIR="patchs"
 
 # 创建存储 patch 文件的目录（如果不存在）
 mkdir -p "$PATCH_DIR"
