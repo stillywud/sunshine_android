@@ -26,8 +26,10 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
         ndk {
             ndkVersion = "28.0.13004108"
+            abiFilters 'arm64-v8a'
         }
     }
 
@@ -54,4 +56,6 @@ flutter {
 dependencies {
     implementation 'org.slf4j:slf4j-api:1.7.32'
     implementation 'org.jmdns:jmdns:3.5.8'
+    // 添加 AndroidX 核心库
+    implementation 'androidx.core:core:1.12.0'
 }
