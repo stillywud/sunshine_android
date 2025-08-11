@@ -129,6 +129,34 @@ jobject convertMapToJavaHashMap(JNIEnv *env, const std::map<std::string, std::an
 JNIEXPORT void JNICALL Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *, jclass);
 
 JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
+    BOOST_LOG(info) << "Stopping sunshine server"sv;
+    
+    // Send TEARDOWN message to all active sessions
+    extern void send_teardown_to_all_sessions();
+    send_teardown_to_all_sessions();
+    
+    // Stop audio recording if it's running
+    Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
+    
+    // Stop the stream and cleanup resources
+    if (g_env != nullptr) {
+        // Cleanup any global references
+        if (sunshineServerClass != nullptr) {
+            env->DeleteGlobalRef(sunshineServerClass);
+            sunshineServerClass = nullptr;
+        }
+    }
+    
+    // Reset global variables
+    jvm = nullptr;
+    g_env = nullptr;
+    samples = nullptr;
+    
+    BOOST_LOG(info) << "Sunshine server stopped"sv;
+}
+
+JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
     env->GetJavaVM(&jvm);
     g_env = env;

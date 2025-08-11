@@ -21,6 +21,10 @@ namespace sync_util {
       return std::lock_guard {_lock};
     }
 
+    std::lock_guard<mutex_t> lock() const {
+      return std::lock_guard {_lock};
+    }
+
     template<class... Args>
     sync_t(Args &&...args):
         raw {std::forward<Args>(args)...} {
@@ -88,7 +92,7 @@ namespace sync_util {
     value_t raw;
 
   private:
-    mutex_t _lock;
+    mutable mutex_t _lock;
   };
 
 }  // namespace sync_util
