@@ -148,59 +148,103 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
         auto shutdown_event = mail::man->event<bool>(mail::shutdown);
         shutdown_event->raise(true);
     }
+    BOOST_LOG(info) << " HTTP server Stopped"sv;
 
-
-    // Stop audio recording if it's running
+    // Stop audio recording first to prevent access to freed resources
     Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
-    
-    // Start cleanup in a separate thread
-    cleanupThread = std::thread([env]() {
-        BOOST_LOG(info) << "Starting cleanup thread"sv;
-        
-        try {
-            // Send TEARDOWN message to all active sessions
-            rtsp_stream::terminate_sessions();
-            
-            // Stop the stream and cleanup resources
-            if (g_env != nullptr) {
-                // Cleanup any global references
-                if (sunshineServerClass != nullptr) {
-                    env->DeleteGlobalRef(sunshineServerClass);
-                    sunshineServerClass = nullptr;
-                }
-            }
-            
-            BOOST_LOG(info) << "Cleanup completed"sv;
-        } catch (const std::exception& e) {
-            BOOST_LOG(error) << "Cleanup thread error: "sv << e.what();
-        }
-        
-        isCleaningUp = false;
-    });
-    
-    // Detach the thread to run independently
-    cleanupThread.detach();
+
+//    // Wait for audio recording thread to stop
+//    int audioWaitCount = 0;
+//    while (isAudioRecording && audioWaitCount < 20) { // Wait up to 2 seconds
+//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//        audioWaitCount++;
+//    }
+
+    // Clear samples queue
+    if (samples) {
+        samples->stop();
+        samples = nullptr;
+    }
+
+    // Stop task pool
+    task_pool.stop();
+
+    // Send TEARDOWN message to all active sessions
+    rtsp_stream::terminate_sessions();
+
+    // Wait for all threads to finish properly
+//    int threadWaitCount = 0;
+//    while (threadWaitCount < 30) { // Wait up to 3 seconds
+//
+//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//        threadWaitCount++;
+//    }
+
+    // Cleanup global references
+    if (g_env != nullptr && sunshineServerClass != nullptr) {
+        env->DeleteGlobalRef(sunshineServerClass);
+        sunshineServerClass = nullptr;
+    }
+
+    // Reset global variables
+    g_env = nullptr;
+    samples = nullptr;
+
+    isCleaningUp = false;
+    BOOST_LOG(info) << "Sunshine server stopped"sv;
 }
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
+    // Wait for any existing cleanup to complete
+//    int cleanupWaitCount = 0;
+//    while (isCleaningUp && cleanupWaitCount < 20) { // Wait up to 2 seconds
+//        BOOST_LOG(info) << "Waiting for cleanup to complete..."sv;
+//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//        cleanupWaitCount++;
+//    }
+    
+    if (isCleaningUp) {
+        BOOST_LOG(error) << "Cleanup did not complete in time"sv;
+        return;
+    }
+    
+    // Reset cleanup flag
+    isCleaningUp = false;
+    
     env->GetJavaVM(&jvm);
     g_env = env;
-    // Use the passed clazz parameter directly instead of looking up the class by name
+    
+    // Clean up any existing global reference
+    if (sunshineServerClass != nullptr) {
+        env->DeleteGlobalRef(sunshineServerClass);
+        sunshineServerClass = nullptr;
+    }
+    
+    // Create new global reference
     sunshineServerClass = (jclass) env->NewGlobalRef(clazz);
     if (sunshineServerClass == nullptr) {
         BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
         return;
     }
+    
+    // Initialize logging
     deinit = logging::init(1, "/dev/null");
     BOOST_LOG(info) << "Start sunshine server"sv;
-    // log sunshineServerClass
-    BOOST_LOG(info) << "sunshineServerClass: "sv << sunshineServerClass;
+    
+    // Initialize mail system
     mail::man = std::make_shared<safe::mail_raw_t>();
     task_pool.start(1);
+    
+    // Reset samples
+    samples = nullptr;
+    
+    // Start HTTP server in a separate thread
     std::thread httpThread{nvhttp::start};
+    httpThread.detach();
+    
+    // Start RTSP stream
     rtsp_stream::rtpThread();
-    httpThread.join();
 }
 
 JNIEXPORT void JNICALL
@@ -370,6 +414,21 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
 }
 
 JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_stopVirtualDisplay(JNIEnv *env, jclass clazz) {
+    // This method is called from Java to stop the virtual display
+    BOOST_LOG(info) << "stopVirtualDisplay called from Java"sv;
+    
+    // Ensure audio recording is stopped
+    Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
+    
+    // Clear any pending samples
+    if (samples) {
+        samples->stop();
+        samples = nullptr;
+    }
+}
+
+JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass clazz) {
     if (!isAudioRecording) {
         return;
@@ -380,13 +439,17 @@ Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass 
 
     // 等待线程结束
     if (audioRecordingThread.joinable()) {
-        audioRecordingThread.join();
+        try {
+            audioRecordingThread.join();
+        } catch (const std::exception& e) {
+            BOOST_LOG(error) << "Error joining audio recording thread: "sv << e.what();
+        }
     }
 
     // 清理全局引用
     if (::globalAudioRecord != nullptr) {
         JNIEnv *threadEnv;
-        if (jvm->AttachCurrentThread(&threadEnv, nullptr) == JNI_OK) {
+        if (jvm && jvm->AttachCurrentThread(&threadEnv, nullptr) == JNI_OK) {
             threadEnv->DeleteGlobalRef(::globalAudioRecord);
             ::globalAudioRecord = nullptr;
             jvm->DetachCurrentThread();

@@ -25,6 +25,7 @@ public class MainActivity extends FlutterActivity {
     private static final int PERMISSION_REQUEST_CODE = 1001;
     private MediaProjectionManager mediaProjectionManager;
     public static Context context;
+    private MethodChannel channel;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -33,7 +34,19 @@ public class MainActivity extends FlutterActivity {
         requestMicrophonePermission();
         NativeBridge.init(this);
         mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        MethodChannel channel = new MethodChannel(getFlutterEngine().getDartExecutor().getBinaryMessenger(), "com.nightmare.sunshine");
+        setupChannel();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (channel == null) {
+            setupChannel();
+        }
+    }
+
+    private void setupChannel() {
+        channel = new MethodChannel(getFlutterEngine().getDartExecutor().getBinaryMessenger(), "com.nightmare.sunshine");
         channel.setMethodCallHandler(new MethodChannel.MethodCallHandler() {
             @Override
             public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
@@ -58,6 +71,15 @@ public class MainActivity extends FlutterActivity {
                 }
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (channel != null) {
+            channel.setMethodCallHandler(null);
+            channel = null;
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -97,9 +119,13 @@ public class MainActivity extends FlutterActivity {
     }
 
     private void stopScreenCaptureService() {
-        Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
-        serviceIntent.setAction("stop");
-        startService(serviceIntent);
-        Log.d("MainActivity", "Screen capture service stop requested");
+        try {
+            Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
+            serviceIntent.setAction("stop");
+            startService(serviceIntent);
+            Log.d("MainActivity", "Screen capture service stop requested");
+        } catch (Exception e) {
+            Log.e("MainActivity", "Error stopping screen capture service", e);
+        }
     }
 }
