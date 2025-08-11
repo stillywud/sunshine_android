@@ -1174,35 +1174,5 @@ namespace rtsp_stream {
                      << "---End MessageBuffer---"sv << std::endl;
   }
 
-  void send_teardown_to_all_sessions() {
-    // Get a copy of all sessions using the public method
-    auto sessions = server.get_sessions();
-    
-    for (auto &session : sessions) {
-      if (session->control.peer) {
-        try {
-          // Create a simple TEARDOWN message
-          std::string teardown_msg = "TEARDOWN rtsp://localhost/stream RTSP/1.0\r\nCSeq: 0\r\n\r\n";
-          
-          // Create an ENet packet to send the TEARDOWN message
-          auto packet = enet_packet_create(teardown_msg.c_str(), teardown_msg.length(), ENET_PACKET_FLAG_RELIABLE);
-          if (packet) {
-            int result = enet_peer_send(session->control.peer, 0, packet);
-            if (result < 0) {
-              BOOST_LOG(error) << "Failed to send TEARDOWN message via ENet: "sv << result;
-              enet_packet_destroy(packet);
-            } else {
-              BOOST_LOG(info) << "Sent TEARDOWN message to session"sv;
-              // Force delivery of the packet
-              enet_host_flush(session->control.peer->host);
-            }
-          } else {
-            BOOST_LOG(error) << "Failed to create ENet packet for TEARDOWN message";
-          }
-        } catch (const std::exception &e) {
-          BOOST_LOG(error) << "Failed to send TEARDOWN message: "sv << e.what();
-        }
-      }
-    }
-  }
+
 }  // namespace rtsp_stream

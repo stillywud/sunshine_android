@@ -32,6 +32,10 @@ static std::thread audioRecordingThread;
 static std::atomic<bool> isAudioRecording(false);
 static jobject globalAudioRecord = nullptr;
 
+// 声明清理线程
+static std::thread cleanupThread;
+static std::atomic<bool> isCleaningUp(false);
+
 /// Create a Java Integer object
 jobject createJavaInt(JNIEnv *env, int value) {
     jclass integerClass = env->FindClass("java/lang/Integer");
@@ -132,28 +136,42 @@ JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
     BOOST_LOG(info) << "Stopping sunshine server"sv;
     
-    // Send TEARDOWN message to all active sessions
-    extern void send_teardown_to_all_sessions();
-    send_teardown_to_all_sessions();
+    // Check if cleanup is already in progress
+    if (isCleaningUp.exchange(true)) {
+        BOOST_LOG(warning) << "Cleanup already in progress"sv;
+        return;
+    }
     
     // Stop audio recording if it's running
     Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
     
-    // Stop the stream and cleanup resources
-    if (g_env != nullptr) {
-        // Cleanup any global references
-        if (sunshineServerClass != nullptr) {
-            env->DeleteGlobalRef(sunshineServerClass);
-            sunshineServerClass = nullptr;
+    // Start cleanup in a separate thread
+    cleanupThread = std::thread([env]() {
+        BOOST_LOG(info) << "Starting cleanup thread"sv;
+        
+        try {
+            // Send TEARDOWN message to all active sessions
+            rtsp_stream::terminate_sessions();
+            
+            // Stop the stream and cleanup resources
+            if (g_env != nullptr) {
+                // Cleanup any global references
+                if (sunshineServerClass != nullptr) {
+                    env->DeleteGlobalRef(sunshineServerClass);
+                    sunshineServerClass = nullptr;
+                }
+            }
+            
+            BOOST_LOG(info) << "Cleanup completed"sv;
+        } catch (const std::exception& e) {
+            BOOST_LOG(error) << "Cleanup thread error: "sv << e.what();
         }
-    }
+        
+        isCleaningUp = false;
+    });
     
-    // Reset global variables
-    jvm = nullptr;
-    g_env = nullptr;
-    samples = nullptr;
-    
-    BOOST_LOG(info) << "Sunshine server stopped"sv;
+    // Detach the thread to run independently
+    cleanupThread.detach();
 }
 
 JNIEXPORT void JNICALL
@@ -216,11 +234,24 @@ Java_com_nightmare_sunshine_NativeBridge_submitPin(JNIEnv *env, jclass clazz, js
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_SunshineServer_cleanup(JNIEnv *env, jclass clazz) {
+    // Wait for cleanup thread to finish if it's running
+    if (isCleaningUp) {
+        BOOST_LOG(info) << "Waiting for cleanup thread to finish..."sv;
+        // Give the cleanup thread some time to finish
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    
     if (sunshineServerClass != nullptr) {
         env->DeleteGlobalRef(sunshineServerClass);
         sunshineServerClass = nullptr;
     }
-    // 其他清理工作...
+    
+    // Reset global variables
+    jvm = nullptr;
+    g_env = nullptr;
+    samples = nullptr;
+    
+    BOOST_LOG(info) << "Sunshine server cleanup completed"sv;
 }
 
 JNIEXPORT void JNICALL
