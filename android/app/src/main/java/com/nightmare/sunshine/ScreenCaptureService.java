@@ -145,9 +145,6 @@ public class ScreenCaptureService extends Service {
 
         NativeBridge.stopVirtualDisplay();
 
-        // Stop HTTP server
-        NativeBridge.stopHttpServer();
-
         // Release virtual display
         if (virtualDisplay != null) {
             virtualDisplay.release();

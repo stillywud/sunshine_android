@@ -141,7 +141,15 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
         BOOST_LOG(warning) << "Cleanup already in progress"sv;
         return;
     }
-    
+
+    BOOST_LOG(info) << "Stopping HTTP server"sv;
+    // Trigger the shutdown event to stop the HTTP server
+    if (mail::man) {
+        auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+        shutdown_event->raise(true);
+    }
+
+
     // Stop audio recording if it's running
     Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
     
@@ -796,12 +804,3 @@ namespace sunshine_callbacks {
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_nightmare_sunshine_NativeBridge_stopHttpServer(JNIEnv *env, jclass clazz) {
-    BOOST_LOG(info) << "Stopping HTTP server"sv;
-    // Trigger the shutdown event to stop the HTTP server
-    if (mail::man) {
-        auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-        shutdown_event->raise(true);
-    }
-}
