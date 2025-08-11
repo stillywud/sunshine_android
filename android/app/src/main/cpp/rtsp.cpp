@@ -566,6 +566,33 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief Stop the RTSP server and close all connections.
+     */
+    void stop() {
+      // Close the acceptor to stop accepting new connections
+      boost::system::error_code ec;
+      acceptor.close(ec);
+      if (ec) {
+        BOOST_LOG(error) << "Failed to close RTSP acceptor: "sv << ec.message();
+      }
+
+      // Cancel all pending async operations
+      io_context.stop();
+      
+      // Close the next socket if it exists
+      if (next_socket) {
+        next_socket->sock.close(ec);
+        if (ec) {
+          BOOST_LOG(error) << "Failed to close next socket: "sv << ec.message();
+        }
+        next_socket.reset();
+      }
+
+      // Clear all sessions
+      clear(true);
+    }
+
+    /**
      * @brief Removes the provided session from the set of sessions.
      * @param session The session to remove.
      */
@@ -624,7 +651,7 @@ namespace rtsp_stream {
   }
 
   void terminate_sessions() {
-    server.clear(true);
+    server.stop();
   }
 
   int send(tcp::socket &sock, const std::string_view &sv) {
@@ -1120,15 +1147,22 @@ namespace rtsp_stream {
     while (!shutdown_event->peek()) {
       server.iterate(std::min(500ms, config::stream.ping_timeout));
 
-//      if (broadcast_shutdown_event->peek()) {
-//        server.clear();
-//      } else {
+      if (broadcast_shutdown_event->peek()) {
+        server.stop();
+        // Restart the server after stopping
+        boost::system::error_code ec;
+        if (server.bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
+          BOOST_LOG(fatal) << "Couldn't rebind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << ec.message();
+          shutdown_event->raise(true);
+          return;
+        }
+      } else {
         // cleanup all stopped sessions
         server.clear(false);
-//      }
+      }
     }
 
-    server.clear();
+    server.stop();
   }
 
   void print_msg(PRTSP_MESSAGE msg) {
