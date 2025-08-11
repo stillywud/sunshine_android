@@ -192,6 +192,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
               children: [
                 TextButton(
                   onPressed: _isServerRunning ? null : () {
+                    _start();
                     channel.invokeMethod('start').then((_) {
                       setState(() {
                         _isServerRunning = true;
@@ -219,6 +220,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
                 ),
                 TextButton(
                   onPressed: _isServerRunning ? () {
+                    _reset();
                     channel.invokeMethod('stop').then((_) {
                       setState(() {
                         _isServerRunning = false;

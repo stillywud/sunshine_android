@@ -144,6 +144,9 @@ public class NativeBridge {
     
     public static native void stopAudioRecording();
 
+
+    public static native void stopHttpServer();
+
     public static native void enableH265();
 
     private static class PointerStatus {

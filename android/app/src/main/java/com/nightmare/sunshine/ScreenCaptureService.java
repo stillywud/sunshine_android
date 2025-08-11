@@ -142,7 +142,12 @@ public class ScreenCaptureService extends Service {
         
         // Stop audio recording if running
         NativeBridge.stopAudioRecording();
-        
+
+        NativeBridge.stopVirtualDisplay();
+
+        // Stop HTTP server
+        NativeBridge.stopHttpServer();
+
         // Release virtual display
         if (virtualDisplay != null) {
             virtualDisplay.release();
@@ -154,6 +159,9 @@ public class ScreenCaptureService extends Service {
             mediaProjection.stop();
             mediaProjection = null;
         }
+
+        // Clear the media projection reference in NativeBridge
+        NativeBridge.mediaProjection = null;
         
         isRunning = false;
         
