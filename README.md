@@ -13,3 +13,13 @@
 ## Flutter
 
 使用这个框架并不是为了跨平台，仅仅是因为开发效率更高，并且我对 Flutter 更熟练
+
+
+
+为了加快编译速度，需要提供以下url
+http://127.0.0.1/boost-1.86.0-cmake.tar.xz
+
+http://127.0.0.1/prebuilts/openssl/3.3.2/arm64-v8a-android.tar.gz
+
+
+这些文件放置在android/app/libs下

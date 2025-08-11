@@ -55,7 +55,7 @@ endif()
 
 # add openssl target
 ExternalProject_Add(openssl
-        URL https://builds.viaduck.org/prebuilts/openssl/${OPENSSL_PREBUILT_VERSION}/${PREBUILT_BRANCH}.tar.gz
+        URL http://127.0.0.1/prebuilts/openssl/${OPENSSL_PREBUILT_VERSION}/${PREBUILT_BRANCH}.tar.gz
 
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND ""

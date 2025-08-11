@@ -39,7 +39,7 @@ if(NOT Boost_FOUND)
     set(BOOST_INCLUDE_LIBRARIES
             ${BOOST_COMPONENTS})
     set(BOOST_URL
-            "https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz")
+            "http://127.0.0.1/boost-1.86.0-cmake.tar.xz")
     set(BOOST_HASH
             "MD5=D02759931CEDC02ADED80402906C5EB6")
 
