@@ -35,6 +35,7 @@ static jobject globalAudioRecord = nullptr;
 // 声明清理线程
 static std::thread cleanupThread;
 static std::atomic<bool> isCleaningUp(false);
+static std::atomic<bool> isTaskPoolRunning(false);
 
 /// Create a Java Integer object
 jobject createJavaInt(JNIEnv *env, int value) {
@@ -167,7 +168,7 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
     }
 
     // Stop task pool
-    task_pool.stop();
+    //task_pool.stop();
 
     // Send TEARDOWN message to all active sessions
     rtsp_stream::terminate_sessions();
@@ -186,11 +187,18 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
         sunshineServerClass = nullptr;
     }
 
+    // Reset logging system
+    deinit.reset();
+
+    // Reset mail system
+    mail::man.reset();
+
     // Reset global variables
     g_env = nullptr;
     samples = nullptr;
 
     isCleaningUp = false;
+    //isTaskPoolRunning = false;
     BOOST_LOG(info) << "Sunshine server stopped"sv;
 }
 
@@ -203,7 +211,8 @@ Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
 //        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 //        cleanupWaitCount++;
 //    }
-    
+    BOOST_LOG(info) << "step 1"sv;
+
     if (isCleaningUp) {
         BOOST_LOG(error) << "Cleanup did not complete in time"sv;
         return;
@@ -211,40 +220,62 @@ Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
     
     // Reset cleanup flag
     isCleaningUp = false;
-    
+    BOOST_LOG(info) << "step 2"sv;
+
     env->GetJavaVM(&jvm);
     g_env = env;
-    
+    BOOST_LOG(info) << "step 3"sv;
+
     // Clean up any existing global reference
     if (sunshineServerClass != nullptr) {
         env->DeleteGlobalRef(sunshineServerClass);
         sunshineServerClass = nullptr;
     }
-    
+    BOOST_LOG(info) << "step 4"sv;
+
     // Create new global reference
     sunshineServerClass = (jclass) env->NewGlobalRef(clazz);
     if (sunshineServerClass == nullptr) {
         BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
         return;
     }
-    
+    BOOST_LOG(info) << "step 5"sv;
+
     // Initialize logging
     deinit = logging::init(1, "/dev/null");
     BOOST_LOG(info) << "Start sunshine server"sv;
-    
+    BOOST_LOG(info) << "step 6"sv;
+
     // Initialize mail system
     mail::man = std::make_shared<safe::mail_raw_t>();
-    task_pool.start(1);
-    
+    BOOST_LOG(info) << "step 61"sv;
+    // Ensure mail system is fully initialized before starting task pool
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    BOOST_LOG(info) << "step 62"sv;
+
+    // Only start the task pool if it's not already running
+    if (!isTaskPoolRunning.exchange(true)) {
+        task_pool.start(1);
+        isTaskPoolRunning=true;
+        BOOST_LOG(info) << "Task pool started"sv;
+    } else {
+        BOOST_LOG(info) << "Task pool already running"sv;
+    }
+    BOOST_LOG(info) << "step 7"sv;
+
     // Reset samples
     samples = nullptr;
-    
+    BOOST_LOG(info) << "step 8"sv;
+
     // Start HTTP server in a separate thread
     std::thread httpThread{nvhttp::start};
     httpThread.detach();
-    
+    BOOST_LOG(info) << "step 9"sv;
+
     // Start RTSP stream
     rtsp_stream::rtpThread();
+    BOOST_LOG(info) << "step 10"sv;
+
 }
 
 JNIEXPORT void JNICALL
