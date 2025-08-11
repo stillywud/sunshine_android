@@ -44,6 +44,8 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _elapsedTime = 0;
   // 当前状态：0-停止，1-运行，2-暂停
   int _state = 0;
+  // 服务器状态：false-停止，true-运行
+  bool _isServerRunning = false;
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -189,11 +191,15 @@ class _StopwatchPageState extends State<StopwatchPage> {
               spacing: 16,
               children: [
                 TextButton(
-                  onPressed: () {
-                    channel.invokeMethod('start');
+                  onPressed: _isServerRunning ? null : () {
+                    channel.invokeMethod('start').then((_) {
+                      setState(() {
+                        _isServerRunning = true;
+                      });
+                    });
                   },
                   style: TextButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    backgroundColor: _isServerRunning ? Colors.grey : Theme.of(context).colorScheme.primary,
                   ),
                   child: Row(
                     spacing: 4,
@@ -206,6 +212,33 @@ class _StopwatchPageState extends State<StopwatchPage> {
                         'Start Server',
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.onPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _isServerRunning ? () {
+                    channel.invokeMethod('stop').then((_) {
+                      setState(() {
+                        _isServerRunning = false;
+                      });
+                    });
+                  } : null,
+                  style: TextButton.styleFrom(
+                    backgroundColor: _isServerRunning ? Colors.red : Colors.grey,
+                  ),
+                  child: Row(
+                    spacing: 4,
+                    children: [
+                      Icon(
+                        Icons.stop,
+                        color: Colors.white,
+                      ),
+                      Text(
+                        'Stop Server',
+                        style: TextStyle(
+                          color: Colors.white,
                         ),
                       ),
                     ],

@@ -42,6 +42,10 @@ public class MainActivity extends FlutterActivity {
                         startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
                         result.success(null);
                         break;
+                    case "stop":
+                        stopScreenCaptureService();
+                        result.success(null);
+                        break;
                     case "pin":
                         String pin = (String) call.arguments;
                         NativeBridge.submitPin(pin);
@@ -90,5 +94,12 @@ public class MainActivity extends FlutterActivity {
         } else {
             Log.d("MainActivity", "Microphone permission already granted");
         }
+    }
+
+    private void stopScreenCaptureService() {
+        Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
+        serviceIntent.setAction("stop");
+        startService(serviceIntent);
+        Log.d("MainActivity", "Screen capture service stop requested");
     }
 }

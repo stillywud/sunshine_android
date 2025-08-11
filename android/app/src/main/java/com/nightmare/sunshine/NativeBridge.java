@@ -1,7 +1,9 @@
 package com.nightmare.sunshine;
 
+import android.Manifest;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.AudioAttributes;
@@ -17,6 +19,8 @@ import android.text.InputType;
 import android.view.Surface;
 import android.widget.EditText;
 import android.widget.Toast;
+
+import androidx.core.app.ActivityCompat;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,6 +39,8 @@ public class NativeBridge {
     }
 
     public static native void start();
+    
+    public static native void stop();
 
     public static MediaProjection mediaProjection;
 
@@ -84,6 +90,7 @@ public class NativeBridge {
                     .addMatchingUsage(AudioAttributes.USAGE_GAME)
                     .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                     .build();
+
             AudioRecord audioRecord = new AudioRecord.Builder()
                     .setAudioPlaybackCaptureConfig(config)
                     .setAudioFormat(new AudioFormat.Builder()
@@ -134,6 +141,8 @@ public class NativeBridge {
 
     // 添加新方法用于启动音频录制
     public static native void startAudioRecording(AudioRecord audioRecord, int framesPerPacket);
+    
+    public static native void stopAudioRecording();
 
     public static native void enableH265();
 

@@ -33,6 +33,7 @@ public class ScreenCaptureService extends Service {
     private VirtualDisplay virtualDisplay;
 
     private static final String TAG = "SunshineService";
+    private static boolean isRunning = false;
 
     @Override
     public void onCreate() {
@@ -44,6 +45,11 @@ public class ScreenCaptureService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && intent.getAction() != null && intent.getAction().equals("stop")) {
+            stopScreenCapture();
+            return START_NOT_STICKY;
+        }
+
         String sunshineName = Build.MANUFACTURER + "-" + Build.MODEL;
         NativeBridge.setSunshineName(sunshineName);
         NativeBridge.setFileStatePath(getFilesDir().getAbsolutePath() + "/sunshine_state.json");
@@ -65,6 +71,7 @@ public class ScreenCaptureService extends Service {
                 if (mediaProjection != null) {
                     mediaProjection.stop();
                 }
+                isRunning = false;
             }
         }, null);
         NativeBridge.mediaProjection = mediaProjection;
@@ -72,6 +79,7 @@ public class ScreenCaptureService extends Service {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                isRunning = true;
                 NativeBridge.start();
             }
         }).start();
@@ -121,12 +129,39 @@ public class ScreenCaptureService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopScreenCapture();
+    }
+
+    private void stopScreenCapture() {
+        if (!isRunning) {
+            return;
+        }
+        
+        // Stop native streaming
+        NativeBridge.stop();
+        
+        // Stop audio recording if running
+        NativeBridge.stopAudioRecording();
+        
+        // Release virtual display
         if (virtualDisplay != null) {
             virtualDisplay.release();
+            virtualDisplay = null;
         }
+        
+        // Stop media projection
         if (mediaProjection != null) {
             mediaProjection.stop();
+            mediaProjection = null;
         }
+        
+        isRunning = false;
+        
+        // Stop foreground service and notification
+        stopForeground(true);
+        stopSelf();
+        
+        Log.d(TAG, "Screen capture service stopped");
     }
 
     @Override

@@ -29,6 +29,8 @@ static audio::sample_queue_t samples = nullptr;
 
 // 声明全局变量来存储音频录制状态
 static std::thread audioRecordingThread;
+static std::atomic<bool> isAudioRecording(false);
+static jobject globalAudioRecord = nullptr;
 
 /// Create a Java Integer object
 jobject createJavaInt(JNIEnv *env, int value) {
@@ -123,6 +125,8 @@ jobject convertMapToJavaHashMap(JNIEnv *env, const std::map<std::string, std::an
     return map;
 }
 
+// Forward declaration for JNI function
+JNIEXPORT void JNICALL Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *, jclass);
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
@@ -220,34 +224,43 @@ JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass clazz,
                                                              jobject audioRecord,
                                                              jint framesPerPacket) {
+    // 如果已经在录制，先停止
+    if (isAudioRecording) {
+        Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
+    }
+
     // 创建 AudioRecord 的全局引用，以便在线程中使用
-    jobject globalAudioRecord = env->NewGlobalRef(audioRecord);
-    if (globalAudioRecord == nullptr) {
+    ::globalAudioRecord = env->NewGlobalRef(audioRecord);
+    if (::globalAudioRecord == nullptr) {
         BOOST_LOG(error) << "无法创建 AudioRecord 的全局引用"sv;
         return;
     }
 
     // 获取 AudioRecord 类和方法 ID
-    jclass audioRecordClass = env->GetObjectClass(globalAudioRecord);
+    jclass audioRecordClass = env->GetObjectClass(::globalAudioRecord);
     if (audioRecordClass == nullptr) {
         BOOST_LOG(error) << "无法获取 AudioRecord 类"sv;
-        env->DeleteGlobalRef(globalAudioRecord);
+        env->DeleteGlobalRef(::globalAudioRecord);
+        ::globalAudioRecord = nullptr;
         return;
     }
     jmethodID readMethod = env->GetMethodID(audioRecordClass, "read", "([FIII)I");
 
     if (!readMethod) {
         BOOST_LOG(error) << "无法获取 AudioRecord 方法"sv;
-        env->DeleteGlobalRef(globalAudioRecord);
+        env->DeleteGlobalRef(::globalAudioRecord);
+        ::globalAudioRecord = nullptr;
         return;
     }
 
     // 设置活动标志并启动录制线程
-    audioRecordingThread = std::thread([globalAudioRecord, readMethod, framesPerPacket, env]() {
+    isAudioRecording = true;
+    audioRecordingThread = std::thread([readMethod, framesPerPacket]() {
         JNIEnv *threadEnv;
         jint result = jvm->AttachCurrentThread(&threadEnv, nullptr);
         if (result != JNI_OK) {
             BOOST_LOG(error) << "无法将音频线程附加到 JVM"sv;
+            isAudioRecording = false;
             return;
         }
 
@@ -255,9 +268,9 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         jfloatArray buffer = threadEnv->NewFloatArray(framesPerPacket * 2); // 立体声，每帧两个通道
 
         try {
-            while (true) {
+            while (isAudioRecording) {
                 // 读取音频数据
-                jint samplesRead = threadEnv->CallIntMethod(globalAudioRecord, readMethod, buffer,
+                jint samplesRead = threadEnv->CallIntMethod(::globalAudioRecord, readMethod, buffer,
                                                             0, framesPerPacket * 2, 0);
 
                 if (samplesRead > 0) {
@@ -281,9 +294,37 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
             BOOST_LOG(error) << "音频录制过程中发生异常"sv;
         }
 
+        // 清理缓冲区
+        threadEnv->DeleteLocalRef(buffer);
+        
         // 分离线程
         jvm->DetachCurrentThread();
     });
+}
+
+JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass clazz) {
+    if (!isAudioRecording) {
+        return;
+    }
+
+    // 设置停止标志
+    isAudioRecording = false;
+
+    // 等待线程结束
+    if (audioRecordingThread.joinable()) {
+        audioRecordingThread.join();
+    }
+
+    // 清理全局引用
+    if (::globalAudioRecord != nullptr) {
+        JNIEnv *threadEnv;
+        if (jvm->AttachCurrentThread(&threadEnv, nullptr) == JNI_OK) {
+            threadEnv->DeleteGlobalRef(::globalAudioRecord);
+            ::globalAudioRecord = nullptr;
+            jvm->DetachCurrentThread();
+        }
+    }
 }
 
 JNIEXPORT void JNICALL
