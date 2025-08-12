@@ -1035,7 +1035,11 @@ namespace stream {
     // termination when we shut down.
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    BOOST_LOG(debug) << "Control thread starting. Initial shutdown_event: " << shutdown_event->peek()
+                     << ", broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+      BOOST_LOG(verbose) << "Control thread iteration: shutdown_event: " << shutdown_event->peek() 
+                         << ", broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
       bool has_session_awaiting_peer = false;
 
       {
@@ -1108,6 +1112,8 @@ namespace stream {
     }
 
   BOOST_LOG(debug) << "control loop end"sv;
+  BOOST_LOG(debug) << "Control thread ending. Final shutdown_event: " << shutdown_event->peek()
+                   << ", broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
 
     // Let all remaining connections know the server is shutting down
     // reason: graceful termination
@@ -1717,20 +1723,25 @@ namespace stream {
   }
 
   void end_broadcast(broadcast_ctx_t &ctx) {
+    BOOST_LOG(debug) << "Entering end_broadcast";
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
+    BOOST_LOG(debug) << "Raising broadcast_shutdown_event in end_broadcast";
     broadcast_shutdown_event->raise(true);
 
     auto video_packets = mail::man->queue<video::packet_t>(mail::video_packets);
     auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
 
     // Minimize delay stopping video/audio threads
+    BOOST_LOG(debug) << "Stopping video and audio packet queues";
     video_packets->stop();
     audio_packets->stop();
 
+    BOOST_LOG(debug) << "Stopping message_queue_queue and io_context";
     ctx.message_queue_queue->stop();
     ctx.io_context.stop();
 
+    BOOST_LOG(debug) << "Closing sockets";
     ctx.video_sock.close();
     ctx.audio_sock.close();
 
@@ -1747,7 +1758,9 @@ namespace stream {
     ctx.control_thread.join();
     BOOST_LOG(debug) << "All broadcasting threads ended"sv;
 
+    BOOST_LOG(debug) << "Resetting broadcast_shutdown_event"sv;
     broadcast_shutdown_event->reset();
+    BOOST_LOG(debug) << "Exiting end_broadcast";
   }
 
   int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
