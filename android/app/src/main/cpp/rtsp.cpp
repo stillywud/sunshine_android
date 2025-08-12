@@ -590,6 +590,9 @@ namespace rtsp_stream {
 
       // Clear all sessions
       clear(true);
+        // Reset the io_context for potential restart
+        //这里是重启生效的关键
+         io_context.restart();
     }
 
     /**
