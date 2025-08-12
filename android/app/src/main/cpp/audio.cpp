@@ -13,6 +13,7 @@
 #include "config.h"
 #include "globals.h"
 #include "logging.h"
+#include "stream.h"
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "utility.h"
@@ -83,7 +84,10 @@ namespace audio {
     },
   };
 
-  void encodeThread(sample_queue_t samples, config_t config, void *channel_data) {
+  void encodeThread(sample_queue_t samples, config_t config, void *channel_data, safe::mail_t mail) {
+    // Get the shutdown event for this session
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
+    
     auto packets = mail::man->queue<packet_t>(mail::audio_packets);
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
     if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
@@ -111,7 +115,17 @@ namespace audio {
                     << stream.bitrate / 1000 << " kbps (total), LOWDELAY"sv;
 
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
-    while (auto sample = samples->pop()) {
+    while (!shutdown_event->peek()) {
+      // Use a timeout when popping from the queue to allow checking the shutdown event
+      auto sample = samples->pop(100ms);  // 100ms timeout
+      if (!sample) {
+        // If pop timed out, check if we should continue
+        if (shutdown_event->peek()) {
+          break;
+        }
+        continue;
+      }
+      
       buffer_t packet {1400};
 
       int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), packet.size());
@@ -125,6 +139,8 @@ namespace audio {
       packet.fake_resize(bytes);
       packets->raise(channel_data, std::move(packet));
     }
+    
+    BOOST_LOG(debug) << "Audio encode thread ending"sv;
   }
 
   void capture(safe::mail_t mail, config_t config, void *channel_data) {
@@ -201,7 +217,7 @@ namespace audio {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     auto samples = std::make_shared<sample_queue_t::element_type>(30);
-    std::thread thread {encodeThread, samples, config, channel_data};
+    std::thread thread {encodeThread, samples, config, channel_data, mail};
 
     auto fg = util::fail_guard([&]() {
       samples->stop();

@@ -844,7 +844,7 @@ namespace sunshine_callbacks {
 
     void captureAudioLoop(void *channel_data, safe::mail_t mail, const audio::config_t &config) {
         samples = std::make_shared<audio::sample_queue_t::element_type>(30);
-        encodeThread(samples, config, channel_data);
+        audio::encodeThread(samples, config, channel_data, mail);
     }
 
     float from_netfloat(netfloat f) {

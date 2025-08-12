@@ -577,6 +577,7 @@ namespace stream {
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
+              BOOST_LOG(info) << "session stop"sv;
             session::stop(*session);
           }
           break;
@@ -1808,11 +1809,19 @@ namespace stream {
 //      session::stop(*session);
 //    });
 
+    BOOST_LOG(debug) << "Video thread started"sv;
     while_starting_do_nothing(session->state);
+
+    // Check if session is already stopping before proceeding
+    if (session->shutdown_event->peek()) {
+      BOOST_LOG(debug) << "Video thread exiting due to shutdown event"sv;
+      return;
+    }
 
     auto ref = broadcast.ref();
     auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
     if (error < 0) {
+      BOOST_LOG(debug) << "Video thread exiting due to ping error"sv;
       return;
     }
 
@@ -1823,6 +1832,7 @@ namespace stream {
       currentSessionVideoQueue = mail::man->queue<video::packet_t>(mail::video_packets);
     BOOST_LOG(debug) << "Start capturing Video"sv;
     sunshine_callbacks::captureVideoLoop(session, session->mail, session->config.monitor, session->config.audio);
+    BOOST_LOG(debug) << "Video thread ending"sv;
 //    video::capture(session->mail, session->config.monitor, session);
   }
 
@@ -1843,11 +1853,19 @@ namespace stream {
 //      session::stop(*session);
 //    });
 
+    BOOST_LOG(debug) << "Audio thread started"sv;
     while_starting_do_nothing(session->state);
+
+    // Check if session is already stopping before proceeding
+    if (session->shutdown_event->peek()) {
+      BOOST_LOG(debug) << "Audio thread exiting due to shutdown event"sv;
+      return;
+    }
 
     auto ref = broadcast.ref();
     auto error = recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, session->audio.peer, config::stream.ping_timeout);
     if (error < 0) {
+      BOOST_LOG(debug) << "Audio thread exiting due to ping error"sv;
       return;
     }
 //
@@ -1855,8 +1873,9 @@ namespace stream {
 //    auto address = session->audio.peer.address();
 //    session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 //
-    BOOST_LOG(debug) << "Start capturing Audio"sv;
+    BOOST_LOG(info) << "Start capturing Audio"sv;
       sunshine_callbacks::captureAudioLoop(session, session->mail, session->config.audio);
+    BOOST_LOG(info) << "Audio thread ending"sv;
 //    audio::capture(session->mail, session->config.audio, session);
   }
 
@@ -1895,12 +1914,12 @@ namespace stream {
 
       BOOST_LOG(debug) << "Waiting for video to end2..."sv;
       session.videoThread.join();
-      BOOST_LOG(debug) << "Waiting for audio to end..."sv;
+      BOOST_LOG(debug) << "Waiting for audio to end2..."sv;
       session.audioThread.join();
-      BOOST_LOG(debug) << "Waiting for control to end..."sv;
+      BOOST_LOG(debug) << "Waiting for control to end2..."sv;
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
-      BOOST_LOG(debug) << "Resetting Input..."sv;
+      BOOST_LOG(debug) << "Resetting Input2..."sv;
 //      input::reset(session.input);
 
       // If this is the last session, invoke the platform callbacks
