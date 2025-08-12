@@ -920,6 +920,7 @@ namespace stream {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
       session->video.idr_events->raise(true);
+      BOOST_LOG(debug) << "Raised IDR frame event for session " << session;
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
@@ -1050,6 +1051,8 @@ namespace stream {
         KITTY_WHILE_LOOP(auto pos = std::begin(*server->_sessions), pos != std::end(*server->_sessions), {
           // Don't perform additional session processing if we're shutting down
           if (shutdown_event->peek() || broadcast_shutdown_event->peek()) {
+            BOOST_LOG(debug) << "Break KITTY_WHILE_LOOP due to shutdown events: shutdown_event=" 
+                             << shutdown_event->peek() << ", broadcast_shutdown_event=" << broadcast_shutdown_event->peek();
             break;
           }
 
@@ -1663,6 +1666,17 @@ namespace stream {
   }
 
   int start_broadcast(broadcast_ctx_t &ctx) {
+    BOOST_LOG(debug) << "Entering start_broadcast at address " << &ctx;
+    
+    // Ensure broadcast_shutdown_event is reset at the start of a new broadcast context
+    {
+      auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+      if (broadcast_shutdown_event->peek()) {
+        BOOST_LOG(debug) << "broadcast_shutdown_event was true at start_broadcast, resetting it.";
+        broadcast_shutdown_event->reset();
+      }
+    }
+
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     auto protocol = address_family == net::IPV4 ? udp::v4() : udp::v6();
     auto control_port = net::map_port(CONTROL_PORT);
@@ -1719,6 +1733,7 @@ namespace stream {
 
     ctx.recv_thread = std::thread {recvThread, std::ref(ctx)};
 
+    BOOST_LOG(debug) << "start_broadcast completed successfully for context at address " << &ctx;
     return 0;
   }
 
@@ -1729,11 +1744,11 @@ namespace stream {
     BOOST_LOG(debug) << "Raising broadcast_shutdown_event in end_broadcast";
     broadcast_shutdown_event->raise(true);
 
+    BOOST_LOG(debug) << "Stopping video and audio packet queues";
     auto video_packets = mail::man->queue<video::packet_t>(mail::video_packets);
     auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
 
     // Minimize delay stopping video/audio threads
-    BOOST_LOG(debug) << "Stopping video and audio packet queues";
     video_packets->stop();
     audio_packets->stop();
 
@@ -1900,14 +1915,17 @@ namespace stream {
     }
 
     void stop(session_t &session) {
+      BOOST_LOG(debug) << "Attempting to stop session " << &session << " with current state " << (int)session.state.load(std::memory_order_relaxed);
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
       if (already_stopping) {
+        BOOST_LOG(debug) << "Session " << &session << " is already stopping or stopped.";
         return;
       }
-
+      BOOST_LOG(debug) << "Session " << &session << " state changed to STOPPING. Raising shutdown event.";
       session.shutdown_event->raise(true);
+      BOOST_LOG(debug) << "Session shutdown event raised for session " << &session;
     }
 
     void join(session_t &session) {
