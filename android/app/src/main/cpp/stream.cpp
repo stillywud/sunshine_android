@@ -496,7 +496,7 @@ namespace stream {
       }
 
       // Once the control stream connection is established, RTSP session state can be torn down
-//      rtsp_stream::launch_session_clear(session_p->launch_session_id);
+      rtsp_stream::launch_session_clear(session_p->launch_session_id);
 
       session_p->control.peer = peer;
 

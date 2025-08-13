@@ -216,8 +216,10 @@ namespace rtsp_stream {
       iv[11] = 'R';  // RTSP
 
       std::vector<uint8_t> plaintext;
+      BOOST_LOG(debug) << "Attempting to decrypt RTSP message with seq: " << seq << ", payload length: " << bytes;
       if (socket->session->rtsp_cipher->decrypt(std::string_view {(const char *) header->tag, sizeof(header->tag) + bytes}, plaintext, &iv)) {
-        BOOST_LOG(error) << "Failed to verify RTSP message tag"sv;
+        BOOST_LOG(error) << "Failed to verify RTSP message tag for seq: " << seq << ", payload length: " << bytes;
+        BOOST_LOG(error) << "Session IV counter: " << socket->session->rtsp_iv_counter;
 
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
@@ -518,7 +520,9 @@ namespace rtsp_stream {
         if (launch_session->id != launch_session_id) {
           BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
         } else {
+          BOOST_LOG(debug) << "Clearing RTSP session with ID: " << launch_session_id;
           launch_event.pop();
+          BOOST_LOG(debug) << "RTSP session cleared";
         }
       }
     }

@@ -341,9 +341,11 @@ make_launch_session(bool host_audio, const args_t &args) {
   // Encrypted RTSP is enabled with client reported corever >= 1
   auto corever = util::from_view(get_arg(args, "corever", "0"));
   if (corever >= 1) {
+    BOOST_LOG(debug) << "Initializing RTSP cipher for new session";
     launch_session->rtsp_cipher =
         crypto::cipher::gcm_t{launch_session->gcm_key, false};
     launch_session->rtsp_iv_counter = 0;
+    BOOST_LOG(debug) << "RTSP cipher initialized with IV counter: " << launch_session->rtsp_iv_counter;
   }
   launch_session->rtsp_url_scheme =
       launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
