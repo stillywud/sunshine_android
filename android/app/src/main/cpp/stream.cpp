@@ -888,6 +888,7 @@ namespace stream {
   }
 
   void controlBroadcastThread(control_server_t *server) {
+    BOOST_LOG(debug) << "Entering controlBroadcastThread";
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
     });
@@ -1038,6 +1039,12 @@ namespace stream {
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     BOOST_LOG(debug) << "Control thread starting. Initial shutdown_event: " << shutdown_event->peek()
                      << ", broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
+    // Reset the broadcast_shutdown_event for this control session to ensure it starts in a clean state
+    if (broadcast_shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Resetting broadcast_shutdown_event for new control session";
+        broadcast_shutdown_event->reset();
+        BOOST_LOG(debug) << "After reset - broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
+    }
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       BOOST_LOG(verbose) << "Control thread iteration: shutdown_event: " << shutdown_event->peek() 
                          << ", broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
@@ -1671,9 +1678,11 @@ namespace stream {
     // Ensure broadcast_shutdown_event is reset at the start of a new broadcast context
     {
       auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+      BOOST_LOG(debug) << "Before reset in start_broadcast - broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
       if (broadcast_shutdown_event->peek()) {
         BOOST_LOG(debug) << "broadcast_shutdown_event was true at start_broadcast, resetting it.";
         broadcast_shutdown_event->reset();
+        BOOST_LOG(debug) << "After reset in start_broadcast - broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
       }
     }
 
@@ -1976,6 +1985,16 @@ namespace stream {
       if (!session.broadcast_ref) {
         return -1;
       }
+      
+      BOOST_LOG(debug) << "Session start - shutdown_event state: " << session.shutdown_event->peek();
+      // Check and reset broadcast_shutdown_event to ensure clean start
+      auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+      BOOST_LOG(debug) << "Session start - broadcast_shutdown_event state: " << broadcast_shutdown_event->peek();
+      if (broadcast_shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Resetting broadcast_shutdown_event in session start";
+        broadcast_shutdown_event->reset();
+        BOOST_LOG(debug) << "After reset in session start - broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
+      }
 
       session.control.expected_peer_address = addr_string;
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
@@ -2017,6 +2036,7 @@ namespace stream {
       auto mail = std::make_shared<safe::mail_raw_t>();
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
+      BOOST_LOG(debug) << "New session shutdown_event created, initial state: " << session->shutdown_event->peek();
       session->launch_session_id = launch_session.id;
 
       session->config = config;
