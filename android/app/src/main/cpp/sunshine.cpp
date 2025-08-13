@@ -746,6 +746,7 @@ namespace sunshine_callbacks {
 
         // Encoding loop
         while (!shutdown_event->peek()) {
+
             bool requested_idr_frame = false;
             if (idr_events->peek()) {
                 requested_idr_frame = true;
@@ -828,6 +829,7 @@ namespace sunshine_callbacks {
                 break;
             }
         }
+        BOOST_LOG(info) << "视频录制收到停止事件: "sv << status;
 
         stopVirtualDisplay();
         // 停止编码器

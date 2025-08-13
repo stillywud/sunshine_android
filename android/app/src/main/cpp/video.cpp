@@ -1893,12 +1893,6 @@ namespace video {
     BOOST_LOG(debug) << "Minimum frame time set to "sv << minimum_frame_time.count() << "ms, based on min fps factor of "sv << config::video.min_fps_factor << "."sv;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    BOOST_LOG(debug) << "Initial shutdown_event state: " << shutdown_event->peek();
-    // Reset the shutdown event for this encoding session to ensure it starts in a clean state
-    if (shutdown_event->peek()) {
-      BOOST_LOG(debug) << "Resetting shutdown_event for new encoding session";
-      shutdown_event->reset();
-    }
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
@@ -1922,14 +1916,7 @@ namespace video {
       //
       // If we have to reinit before we have received any captured frames, we will encode
       // the blank dummy frame just to let Moonlight know that we're alive.
-      BOOST_LOG(verbose) << "Checking loop conditions: shutdown_event=" << shutdown_event->peek() 
-                         << ", images->running()=" << images->running() 
-                         << ", reinit_event.peek()=" << reinit_event.peek() 
-                         << ", frame_nr=" << frame_nr;
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
-        BOOST_LOG(debug) << "Breaking encode loop: shutdown_event=" << shutdown_event->peek() 
-                         << ", images->running()=" << images->running() 
-                         << ", reinit_event=" << (reinit_event.peek() && frame_nr > 1);
         break;
       }
 

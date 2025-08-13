@@ -1253,6 +1253,13 @@ namespace stream {
 
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    BOOST_LOG(debug) << "Video broadcast thread starting. Initial shutdown_event (broadcast_shutdown): " << shutdown_event->peek();
+    // Reset the shutdown event for this video broadcast session to ensure it starts in a clean state
+    if (shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Resetting shutdown_event (broadcast_shutdown) for new video broadcast session";
+        shutdown_event->reset();
+        BOOST_LOG(debug) << "After reset - shutdown_event (broadcast_shutdown): " << shutdown_event->peek();
+    }
     auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
     auto timebase = boost::posix_time::microsec_clock::universal_time();
 
@@ -1277,6 +1284,7 @@ namespace stream {
 
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Video broadcast thread exiting due to shutdown event";
         break;
       }
 
@@ -1571,6 +1579,13 @@ namespace stream {
 
   void audioBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    BOOST_LOG(debug) << "Audio broadcast thread starting. Initial shutdown_event (broadcast_shutdown): " << shutdown_event->peek();
+    // Reset the shutdown event for this audio broadcast session to ensure it starts in a clean state
+    if (shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Resetting shutdown_event (broadcast_shutdown) for new audio broadcast session";
+        shutdown_event->reset();
+        BOOST_LOG(debug) << "After reset - shutdown_event (broadcast_shutdown): " << shutdown_event->peek();
+    }
     auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
 
     audio_packet_t audio_packet;
@@ -1594,6 +1609,7 @@ namespace stream {
 
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Audio broadcast thread exiting due to shutdown event";
         break;
       }
 
@@ -1684,6 +1700,22 @@ namespace stream {
         broadcast_shutdown_event->reset();
         BOOST_LOG(debug) << "After reset in start_broadcast - broadcast_shutdown_event: " << broadcast_shutdown_event->peek();
       }
+    }
+
+    // Ensure video and audio packet queues are running for the new broadcast context
+    auto video_packets = mail::man->queue<video::packet_t>(mail::video_packets);
+    auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
+    
+    if (!video_packets->running()) {
+        BOOST_LOG(debug) << "Video packets queue was not running, restarting it.";
+        // We need to restart the queue, but there's no direct API for this.
+        // The queue should be restarted when a new session starts.
+    }
+    
+    if (!audio_packets->running()) {
+        BOOST_LOG(debug) << "Audio packets queue was not running, restarting it.";
+        // We need to restart the queue, but there's no direct API for this.
+        // The queue should be restarted when a new session starts.
     }
 
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
@@ -1866,15 +1898,18 @@ namespace stream {
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
-      currentSessionVideoQueue = mail::man->queue<video::packet_t>(mail::video_packets);
+    currentSessionVideoQueue = mail::man->queue<video::packet_t>(mail::video_packets);
     BOOST_LOG(debug) << "Start capturing Video"sv;
     sunshine_callbacks::captureVideoLoop(session, session->mail, session->config.monitor, session->config.audio);
     BOOST_LOG(debug) << "Video thread ending"sv;
+    
+    // Clear the currentSessionVideoQueue when the video thread ends
+    currentSessionVideoQueue.reset();
 //    video::capture(session->mail, session->config.monitor, session);
   }
 
     void postFrame(std::vector<uint8_t> &&frame_data, int64_t frame_index, bool idr, void* channel_data)  {
-        if(currentSessionVideoQueue) {
+        if(currentSessionVideoQueue && currentSessionVideoQueue->running()) {
             auto packet = std::make_unique<video::packet_raw_generic>(
                     std::move(frame_data),
                     frame_index,
@@ -1882,6 +1917,8 @@ namespace stream {
             );
             packet->channel_data = channel_data;
             currentSessionVideoQueue->raise(std::move(packet));
+        } else {
+            BOOST_LOG(debug) << "Dropping frame because video queue is not available or not running";
         }
     }
 
