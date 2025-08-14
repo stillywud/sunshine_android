@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.24.0)
 
 project("sunshine")
 
+set(CMAKE_CXX_FLAGS   "-g")                     # 调试信息
+
+
 include(dependencies/Boost_Sunshine.cmake)
 add_subdirectory(dependencies/moonlight-common-c/enet)
 add_subdirectory(dependencies/openssl-cmake)
