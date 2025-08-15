@@ -31,6 +31,7 @@ import java.util.Set;
  * NativeBridge 代码修改源 https://gitee.com/connect-screen/connect-screen
  * 做了大量的优化和修改
  */
+import android.util.Log;
 
 public class NativeBridge {
 
@@ -115,28 +116,23 @@ public class NativeBridge {
     }
 
     public static void stopVirtualDisplay() {
-        new Handler(Looper.getMainLooper()).post(() -> {
-//            CreateVirtualDisplay.powerOnScreen();
-//            CreateVirtualDisplay.restoreAspectRatio();
+        // 确保在主线程中执行
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            doStopVirtualDisplay();
+        } else {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                doStopVirtualDisplay();
+            });
+        }
+    }
 
-//            IWindowManager windowManager = ServiceUtils.getWindowManager();
-//            windowManager.setDisplayImePolicy(Display.DEFAULT_DISPLAY, 0);
-//            if (originalVolume != 0 && MediaProjectionService.instance != null) {
-//                State.log("恢复音量: " + originalVolume);
-//                AudioManager audioManager = (AudioManager) MediaProjectionService.instance.getSystemService(Context.AUDIO_SERVICE);
-//                audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
-//                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0);
-//            }
-//            if (autoRotateAndScaleForMoonlight != null) {
-//                autoRotateAndScaleForMoonlight.stop();
-//                autoRotateAndScaleForMoonlight = null;
-//            }
-//            if (State.mirrorVirtualDisplay != null) {
-//                State.mirrorVirtualDisplay.release();
-//                State.mirrorVirtualDisplay = null;
-//                ExitAll.execute(MediaProjectionService.instance, true);
-//            }
-        });
+    private static void doStopVirtualDisplay() {
+        try {
+            // 停止音频录制
+            stopAudioRecording();
+        } catch (Exception e) {
+            Log.e(TAG, "Error stopping audio recording", e);
+        }
     }
 
     // 添加新方法用于启动音频录制
@@ -145,7 +141,6 @@ public class NativeBridge {
     public static native void stopAudioRecording();
 
 
-    public static native void stopHttpServer();
 
     public static native void enableH265();
 

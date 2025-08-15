@@ -140,26 +140,6 @@ public class ScreenCaptureService extends Service {
         // Stop native streaming
         NativeBridge.stop();
         
-        // Stop audio recording if running
-        NativeBridge.stopAudioRecording();
-
-        NativeBridge.stopVirtualDisplay();
-
-        // Release virtual display
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-        }
-        
-        // Stop media projection
-        if (mediaProjection != null) {
-            mediaProjection.stop();
-            mediaProjection = null;
-        }
-
-        // Clear the media projection reference in NativeBridge
-        NativeBridge.mediaProjection = null;
-        
         isRunning = false;
         
         // Stop foreground service and notification

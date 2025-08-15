@@ -154,32 +154,14 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
     // Stop audio recording first to prevent access to freed resources
     Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
 
-//    // Wait for audio recording thread to stop
-//    int audioWaitCount = 0;
-//    while (isAudioRecording && audioWaitCount < 20) { // Wait up to 2 seconds
-//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-//        audioWaitCount++;
-//    }
-
     // Clear samples queue
     if (samples) {
         samples->stop();
         samples = nullptr;
     }
 
-    // Stop task pool
-    //task_pool.stop();
-
     // Send TEARDOWN message to all active sessions
     rtsp_stream::terminate_sessions();
-
-    // Wait for all threads to finish properly
-//    int threadWaitCount = 0;
-//    while (threadWaitCount < 30) { // Wait up to 3 seconds
-//
-//        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-//        threadWaitCount++;
-//    }
 
     // Cleanup global references
     if (g_env != nullptr && sunshineServerClass != nullptr) {
@@ -198,7 +180,6 @@ Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
     samples = nullptr;
 
     isCleaningUp = false;
-    //isTaskPoolRunning = false;
     BOOST_LOG(info) << "Sunshine server stopped"sv;
 }
 
@@ -461,10 +442,6 @@ Java_com_nightmare_sunshine_NativeBridge_stopVirtualDisplay(JNIEnv *env, jclass 
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass clazz) {
-    if (!isAudioRecording) {
-        return;
-    }
-
     // 设置停止标志
     isAudioRecording = false;
 
