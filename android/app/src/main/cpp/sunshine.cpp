@@ -32,10 +32,6 @@ static std::thread audioRecordingThread;
 static std::atomic<bool> isAudioRecording(false);
 static jobject globalAudioRecord = nullptr;
 
-// 添加互斥锁和条件变量以改进线程同步
-static std::mutex audioRecordingMutex;
-static std::condition_variable audioRecordingCv;
-
 // 声明清理线程
 static std::thread cleanupThread;
 static std::atomic<bool> isCleaningUp(false);
@@ -453,9 +449,7 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
                     }
                 }
                 
-                // 使用条件变量等待一小段时间，以便能够响应停止请求
-                std::unique_lock<std::mutex> lock(audioRecordingMutex);
-                audioRecordingCv.wait_for(lock, std::chrono::milliseconds(10), []{return !isAudioRecording.load();});
+                // 直接进行下一次循环
             }
         } catch (const std::exception& e) {
             BOOST_LOG(error) << "音频录制过程中发生异常: " << e.what();
@@ -510,9 +504,6 @@ Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass 
         BOOST_LOG(info) << "音频录制已经停止"sv;
         return;
     }
-    
-    // 通知条件变量以唤醒音频录制线程
-    audioRecordingCv.notify_all();
     BOOST_LOG(info) << "停止音频录制3"sv;
 
     // 等待线程结束，最多等待5秒
