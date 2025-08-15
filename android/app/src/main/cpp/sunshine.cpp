@@ -32,6 +32,10 @@ static std::thread audioRecordingThread;
 static std::atomic<bool> isAudioRecording(false);
 static jobject globalAudioRecord = nullptr;
 
+// 添加互斥锁和条件变量以改进线程同步
+static std::mutex audioRecordingMutex;
+static std::condition_variable audioRecordingCv;
+
 // 声明清理线程
 static std::thread cleanupThread;
 static std::atomic<bool> isCleaningUp(false);
@@ -351,8 +355,11 @@ JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass clazz,
                                                              jobject audioRecord,
                                                              jint framesPerPacket) {
+    BOOST_LOG(info) << "开始音频录制1"sv;
+
     // 如果已经在录制，先停止
     if (isAudioRecording) {
+        BOOST_LOG(info) << "检测到现有音频录制，正在停止..."sv;
         Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
     }
 
@@ -362,6 +369,7 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         BOOST_LOG(error) << "无法创建 AudioRecord 的全局引用"sv;
         return;
     }
+    BOOST_LOG(info) << "开始音频录制2"sv;
 
     // 获取 AudioRecord 类和方法 ID
     jclass audioRecordClass = env->GetObjectClass(::globalAudioRecord);
@@ -371,6 +379,8 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         ::globalAudioRecord = nullptr;
         return;
     }
+    BOOST_LOG(info) << "开始音频录制3"sv;
+
     jmethodID readMethod = env->GetMethodID(audioRecordClass, "read", "([FIII)I");
 
     if (!readMethod) {
@@ -379,12 +389,15 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         ::globalAudioRecord = nullptr;
         return;
     }
+    BOOST_LOG(info) << "开始音频录制4"sv;
 
     // 设置活动标志并启动录制线程
     isAudioRecording = true;
     // 保存jvm指针的副本，避免在lambda中直接使用全局变量
     JavaVM* localJvm = jvm;
     audioRecordingThread = std::thread([localJvm, readMethod, framesPerPacket]() {
+        BOOST_LOG(info) << "开始音频录制5"sv;
+
         // 检查JVM是否有效
         if (localJvm == nullptr) {
             BOOST_LOG(error) << "JVM is null in audio recording thread"sv;
@@ -412,7 +425,7 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         }
 
         try {
-            while (isAudioRecording) {
+            while (isAudioRecording.load()) { // 使用 .load() 确保原子读取
                 // 检查全局引用是否仍然有效
                 if (::globalAudioRecord == nullptr) {
                     BOOST_LOG(error) << "Global AudioRecord reference is null"sv;
@@ -431,7 +444,7 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
                         std::vector<float> audioSamples(audioData, audioData + samplesRead);
 
                         // 将音频数据传递给 Sunshine 的音频处理系统
-                        if (samples) {
+                        if (samples && isAudioRecording.load()) { // 再次检查录制状态
                             samples->raise(std::move(audioSamples));
                         }
 
@@ -439,9 +452,15 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
                         threadEnv->ReleaseFloatArrayElements(buffer, audioData, JNI_ABORT);
                     }
                 }
+                
+                // 使用条件变量等待一小段时间，以便能够响应停止请求
+                std::unique_lock<std::mutex> lock(audioRecordingMutex);
+                audioRecordingCv.wait_for(lock, std::chrono::milliseconds(10), []{return !isAudioRecording.load();});
             }
+        } catch (const std::exception& e) {
+            BOOST_LOG(error) << "音频录制过程中发生异常: " << e.what();
         } catch (...) {
-            BOOST_LOG(error) << "音频录制过程中发生异常"sv;
+            BOOST_LOG(error) << "音频录制过程中发生未知异常"sv;
         }
 
         // 清理缓冲区
@@ -451,6 +470,8 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         if (localJvm != nullptr) {
             localJvm->DetachCurrentThread();
         }
+        BOOST_LOG(info) << "开始音频录制11"sv;
+
     });
 }
 
@@ -471,48 +492,68 @@ Java_com_nightmare_sunshine_NativeBridge_stopVirtualDisplay(JNIEnv *env, jclass 
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass clazz) {
+
+    BOOST_LOG(info) << "停止音频录制1"sv;
+
+
     // 检查JVM是否有效
     if (jvm == nullptr) {
         BOOST_LOG(error) << "JVM is null in stopAudioRecording"sv;
         return;
     }
+    BOOST_LOG(info) << "停止音频录制2"sv;
 
     // 使用原子操作检查和设置标志，防止重复调用
     bool expected = true;
     if (!isAudioRecording.compare_exchange_strong(expected, false)) {
         // 如果isAudioRecording已经是false，直接返回
+        BOOST_LOG(info) << "音频录制已经停止"sv;
         return;
     }
+    
+    // 通知条件变量以唤醒音频录制线程
+    audioRecordingCv.notify_all();
+    BOOST_LOG(info) << "停止音频录制3"sv;
 
-    // 等待线程结束
+    // 等待线程结束，最多等待5秒
     if (audioRecordingThread.joinable()) {
-        try {
+        std::future_status status = std::async(std::launch::async, [&]() {
             audioRecordingThread.join();
-        } catch (const std::system_error& e) {
-            BOOST_LOG(error) << "System error joining audio recording thread: "sv << e.what();
-        } catch (const std::exception& e) {
-            BOOST_LOG(error) << "Exception joining audio recording thread: "sv << e.what();
-        } catch (...) {
-            BOOST_LOG(error) << "Unknown error joining audio recording thread"sv;
+        }).wait_for(std::chrono::seconds(5));
+        
+        if (status == std::future_status::timeout) {
+            BOOST_LOG(error) << "Timeout waiting for audio recording thread to join"sv;
+            // 注意：在生产环境中，强制终止线程是不安全的。
+            // 这里仅作为示例，实际应用中应避免强制终止线程。
+            // 可以考虑使用std::terminate()或其他机制来处理这种情况。
+        } else {
+            BOOST_LOG(info) << "停止音频录制4"sv;
         }
+    } else {
+        BOOST_LOG(info) << "音频录制线程不可连接"sv;
     }
+    BOOST_LOG(info) << "停止音频录制5"sv;
 
     // 清理全局引用
-    if (::globalAudioRecord != nullptr) {
-        JNIEnv *threadEnv;
-        jint attachResult = jvm->AttachCurrentThread(&threadEnv, nullptr);
-        if (attachResult == JNI_OK) {
-            // 检查threadEnv是否有效
-            if (threadEnv != nullptr) {
-                threadEnv->DeleteGlobalRef(::globalAudioRecord);
-            }
-            ::globalAudioRecord = nullptr;
-            // 只有在成功附加线程后才分离
-            jvm->DetachCurrentThread();
-        } else {
-            BOOST_LOG(error) << "Failed to attach thread for cleanup, error code: " << attachResult;
-        }
-    }
+//    if (::globalAudioRecord != nullptr) {
+//        BOOST_LOG(info) << "停止音频录制6"sv;
+//
+//        JNIEnv *threadEnv;
+//        jint attachResult = jvm->AttachCurrentThread(&threadEnv, nullptr);
+//        if (attachResult == JNI_OK) {
+//            // 检查threadEnv是否有效
+//            if (threadEnv != nullptr) {
+//                threadEnv->DeleteGlobalRef(::globalAudioRecord);
+//            }
+//            ::globalAudioRecord = nullptr;
+//            // 只有在成功附加线程后才分离
+//            jvm->DetachCurrentThread();
+//        } else {
+//            BOOST_LOG(error) << "Failed to attach thread for cleanup, error code: " << attachResult;
+//        }
+//    }
+    BOOST_LOG(info) << "停止音频录制7"sv;
+
 }
 
 JNIEXPORT void JNICALL
@@ -636,6 +677,8 @@ namespace sunshine_callbacks {
     }
 
     void stopVirtualDisplay() {
+        BOOST_LOG(info) << "停掉虚拟显示 stopVirtualDisplay..."sv;
+
         invokeJavaFunction("stopVirtualDisplay", "()V");
     }
 
