@@ -127,12 +127,14 @@ public class NativeBridge {
     }
 
     private static void doStopVirtualDisplay() {
-        try {
-            // 停止音频录制
-            stopAudioRecording();
-        } catch (Exception e) {
-            Log.e(TAG, "Error stopping audio recording", e);
-        }
+//        try {
+//            // 停止音频录制
+//            if (mediaProjection != null) {
+//                stopAudioRecording();
+//            }
+//        } catch (Exception e) {
+//            Log.e(TAG, "Error stopping audio recording", e);
+//        }
     }
 
     // 添加新方法用于启动音频录制

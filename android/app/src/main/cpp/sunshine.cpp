@@ -64,7 +64,9 @@ void invokeJavaFunction(
     jmethodID method = env->GetStaticMethodID(sunshineServerClass, name, sig);
     if (method == nullptr) {
         BOOST_LOG(error) << "Cannot find method "sv << name << " with signature "sv << sig;
-        jvm->DetachCurrentThread();
+        if (jvm != nullptr) {
+            jvm->DetachCurrentThread();
+        }
         return;
     }
     va_list args;
@@ -74,7 +76,9 @@ void invokeJavaFunction(
         env->ExceptionDescribe();
         env->ExceptionClear();
     }
-    jvm->DetachCurrentThread();
+    if (jvm != nullptr) {
+        jvm->DetachCurrentThread();
+    }
 }
 /// Create a Java Double object
 jobject createJavaDouble(JNIEnv *env, double value) {
@@ -378,9 +382,18 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
 
     // 设置活动标志并启动录制线程
     isAudioRecording = true;
-    audioRecordingThread = std::thread([readMethod, framesPerPacket]() {
+    // 保存jvm指针的副本，避免在lambda中直接使用全局变量
+    JavaVM* localJvm = jvm;
+    audioRecordingThread = std::thread([localJvm, readMethod, framesPerPacket]() {
+        // 检查JVM是否有效
+        if (localJvm == nullptr) {
+            BOOST_LOG(error) << "JVM is null in audio recording thread"sv;
+            isAudioRecording = false;
+            return;
+        }
+        
         JNIEnv *threadEnv;
-        jint result = jvm->AttachCurrentThread(&threadEnv, nullptr);
+        jint result = localJvm->AttachCurrentThread(&threadEnv, nullptr);
         if (result != JNI_OK) {
             BOOST_LOG(error) << "无法将音频线程附加到 JVM"sv;
             isAudioRecording = false;
@@ -389,9 +402,23 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
 
         // 创建缓冲区
         jfloatArray buffer = threadEnv->NewFloatArray(framesPerPacket * 2); // 立体声，每帧两个通道
+        if (buffer == nullptr) {
+            BOOST_LOG(error) << "无法创建音频缓冲区"sv;
+            if (localJvm != nullptr) {
+                localJvm->DetachCurrentThread();
+            }
+            isAudioRecording = false;
+            return;
+        }
 
         try {
             while (isAudioRecording) {
+                // 检查全局引用是否仍然有效
+                if (::globalAudioRecord == nullptr) {
+                    BOOST_LOG(error) << "Global AudioRecord reference is null"sv;
+                    break;
+                }
+                
                 // 读取音频数据
                 jint samplesRead = threadEnv->CallIntMethod(::globalAudioRecord, readMethod, buffer,
                                                             0, framesPerPacket * 2, 0);
@@ -421,7 +448,9 @@ Java_com_nightmare_sunshine_NativeBridge_startAudioRecording(JNIEnv *env, jclass
         threadEnv->DeleteLocalRef(buffer);
         
         // 分离线程
-        jvm->DetachCurrentThread();
+        if (localJvm != nullptr) {
+            localJvm->DetachCurrentThread();
+        }
     });
 }
 
@@ -431,7 +460,7 @@ Java_com_nightmare_sunshine_NativeBridge_stopVirtualDisplay(JNIEnv *env, jclass 
     BOOST_LOG(info) << "stopVirtualDisplay called from Java"sv;
     
     // Ensure audio recording is stopped
-    Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
+   // Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(env, clazz);
     
     // Clear any pending samples
     if (samples) {
@@ -442,25 +471,46 @@ Java_com_nightmare_sunshine_NativeBridge_stopVirtualDisplay(JNIEnv *env, jclass 
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stopAudioRecording(JNIEnv *env, jclass clazz) {
-    // 设置停止标志
-    isAudioRecording = false;
+    // 检查JVM是否有效
+    if (jvm == nullptr) {
+        BOOST_LOG(error) << "JVM is null in stopAudioRecording"sv;
+        return;
+    }
+
+    // 使用原子操作检查和设置标志，防止重复调用
+    bool expected = true;
+    if (!isAudioRecording.compare_exchange_strong(expected, false)) {
+        // 如果isAudioRecording已经是false，直接返回
+        return;
+    }
 
     // 等待线程结束
     if (audioRecordingThread.joinable()) {
         try {
             audioRecordingThread.join();
+        } catch (const std::system_error& e) {
+            BOOST_LOG(error) << "System error joining audio recording thread: "sv << e.what();
         } catch (const std::exception& e) {
-            BOOST_LOG(error) << "Error joining audio recording thread: "sv << e.what();
+            BOOST_LOG(error) << "Exception joining audio recording thread: "sv << e.what();
+        } catch (...) {
+            BOOST_LOG(error) << "Unknown error joining audio recording thread"sv;
         }
     }
 
     // 清理全局引用
     if (::globalAudioRecord != nullptr) {
         JNIEnv *threadEnv;
-        if (jvm && jvm->AttachCurrentThread(&threadEnv, nullptr) == JNI_OK) {
-            threadEnv->DeleteGlobalRef(::globalAudioRecord);
+        jint attachResult = jvm->AttachCurrentThread(&threadEnv, nullptr);
+        if (attachResult == JNI_OK) {
+            // 检查threadEnv是否有效
+            if (threadEnv != nullptr) {
+                threadEnv->DeleteGlobalRef(::globalAudioRecord);
+            }
             ::globalAudioRecord = nullptr;
+            // 只有在成功附加线程后才分离
             jvm->DetachCurrentThread();
+        } else {
+            BOOST_LOG(error) << "Failed to attach thread for cleanup, error code: " << attachResult;
         }
     }
 }
@@ -690,7 +740,9 @@ namespace sunshine_callbacks {
             ANativeWindow_release(inputSurface);
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
-            jvm->DetachCurrentThread();
+            if (jvm != nullptr) {
+                jvm->DetachCurrentThread();
+            }
             return;
         }
 
@@ -818,7 +870,9 @@ namespace sunshine_callbacks {
         AMediaFormat_delete(format);
 
         // 清理 Java Surface 引用
-        jvm->DetachCurrentThread();
+        if (jvm != nullptr) {
+            jvm->DetachCurrentThread();
+        }
     }
 
     void captureAudioLoop(void *channel_data, safe::mail_t mail, const audio::config_t &config) {
@@ -853,7 +907,9 @@ namespace sunshine_callbacks {
                                                                    "(IIIFFFFF)V");
         if (handleTouchPacketMethod == nullptr) {
             BOOST_LOG(error) << "找不到 handleTouchPacket 方法"sv;
-            jvm->DetachCurrentThread();
+            if (jvm != nullptr) {
+                jvm->DetachCurrentThread();
+            }
             return;
         }
 
@@ -873,7 +929,9 @@ namespace sunshine_callbacks {
             env->ExceptionClear();
         }
 
-        jvm->DetachCurrentThread();
+        if (jvm != nullptr) {
+            jvm->DetachCurrentThread();
+        }
     }
 }
 
