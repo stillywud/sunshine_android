@@ -80,7 +80,7 @@ public class NativeBridge {
             int sampleRate = 48000; // 与您的Opus配置匹配
             int channelConfig = AudioFormat.CHANNEL_IN_STEREO;
             int audioFormat = AudioFormat.ENCODING_PCM_FLOAT; // 替代 ENCODING_PCM_FLOAT
-            int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 6;
+            int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 20;
 //            packetDuration=40;
             // 计算每个数据包的帧数 (每个通道的样本数)
             // packetDuration 是毫秒，所以需要除以1000转换为秒
