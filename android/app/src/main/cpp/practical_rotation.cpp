@@ -37,11 +37,16 @@ namespace practical_rotation {
         lastFrameTimestamp = 0;
         lastProcessTime = std::chrono::steady_clock::now();
         
-        // 重置性能优化模式
+        // 重置性能优化模式，为新流提供新的机会
+        bool wasFastModeEnabled = fastModeEnabled.load();
         fastModeEnabled = false;
         slowFrameCount = 0;
         
         BOOST_LOG(info) << "[ROTATION-CACHE] Cache cleared, ready for new video stream";
+        if (wasFastModeEnabled) {
+            BOOST_LOG(warning) << "[ROTATION-CACHE] IMPORTANT: Fast mode was DISABLED - rotation will work again!";
+            BOOST_LOG(warning) << "[ROTATION-CACHE] Previous session had performance issues, this session gets a fresh start";
+        }
         BOOST_LOG(info) << "[ROTATION-CACHE] Performance optimization mode reset";
         BOOST_LOG(info) << "[ROTATION-CACHE] This should resolve frame update issues";
     }
@@ -133,9 +138,10 @@ namespace practical_rotation {
             
             // 性能检测：如果之前的帧处理时间过长，启用快速模式
             if (fastModeEnabled) {
-                BOOST_LOG(warning) << "[ROTATION-FAST] Fast mode enabled due to performance issues";
-                BOOST_LOG(warning) << "[ROTATION-FAST] Skipping complex rotation to reduce latency";
-                BOOST_LOG(warning) << "[ROTATION-FAST] Frame " << totalFrames << " using original data";
+                BOOST_LOG(warning) << "[ROTATION-FAST] Fast mode is ACTIVE - rotation processing DISABLED";
+                BOOST_LOG(warning) << "[ROTATION-FAST] Reason: Performance threshold exceeded (" << slowFrameCount << " slow frames out of " << totalFrames << ")";
+                BOOST_LOG(warning) << "[ROTATION-FAST] Frame " << totalFrames << " using original data (no rotation)";
+                BOOST_LOG(warning) << "[ROTATION-FAST] This is why the image is not rotating!";
                 outputData = encodedData;
                 return true;
             }
@@ -162,18 +168,35 @@ namespace practical_rotation {
             auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
             
-            // 性能监控：如果处理时间超过100ms，记录为慢帧
-            if (duration.count() > 100) {
+            // 性能监控：如果处理时间超过200ms，记录为慢帧（增加阈值避免误判）
+            if (duration.count() > 200) {
                 slowFrameCount++;
                 BOOST_LOG(warning) << "[ROTATION-PERF] Slow frame detected: " << duration.count() << "ms (frame " << totalFrames << ")";
                 BOOST_LOG(warning) << "[ROTATION-PERF] Slow frame count: " << slowFrameCount << "/" << totalFrames;
                 
-                // 如果连续3帧或耵50%的帧都过慢，启用快速模式
-                if (slowFrameCount >= 3 || (totalFrames > 10 && slowFrameCount * 2 > totalFrames)) {
+                // 更保守的快速模式触发条件：连续10帧慢或80%帧慢且总帧数超过20
+                if (slowFrameCount >= 10 || (totalFrames > 20 && slowFrameCount * 5 > totalFrames * 4)) {
                     fastModeEnabled = true;
                     BOOST_LOG(error) << "[ROTATION-PERF] CRITICAL: Enabling fast mode due to consistent slow performance!";
                     BOOST_LOG(error) << "[ROTATION-PERF] This will disable rotation to improve client responsiveness";
                     BOOST_LOG(error) << "[ROTATION-PERF] Slow frames: " << slowFrameCount << "/" << totalFrames;
+                    BOOST_LOG(error) << "[ROTATION-PERF] Trigger condition: " << slowFrameCount << " >= 10 OR " << slowFrameCount << "/" << totalFrames << " >= 80%";
+                } else {
+                    BOOST_LOG(info) << "[ROTATION-PERF] Performance degradation detected but not severe enough to disable rotation";
+                    BOOST_LOG(info) << "[ROTATION-PERF] Current threshold: need 10+ slow frames OR 80%+ slow rate with 20+ total frames";
+                }
+            } else {
+                // 处理时间在合理范围内，记录为正常帧
+                if (fastModeEnabled && totalFrames > 30) {
+                    // 检查最近10帧的性能，如果性能改善则重新启用旋转
+                    int recentFrames = std::min(10, totalFrames.load());
+                    int recentSlowFrames = 0;
+                    // 这里简化处理，直接检查当前帧是否快速
+                    if (duration.count() <= 100) {
+                        BOOST_LOG(info) << "[ROTATION-PERF] Fast frame detected (" << duration.count() << "ms) while in fast mode";
+                        BOOST_LOG(info) << "[ROTATION-PERF] Consider re-enabling rotation if performance is consistently good";
+                        // 暂时不重新启用，等待用户手动清理缓存或重新连接
+                    }
                 }
             }
             

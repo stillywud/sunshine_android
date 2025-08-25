@@ -800,9 +800,23 @@ namespace video_rotation {
         int inputWidth = input.width;   // 1920
         int inputHeight = input.height; // 1080
         
-        // 直接使用输入尺寸作为输出，不做复杂的缩放
-        output.width = inputWidth;
-        output.height = inputHeight;
+        // 90度旋转应该宽高互换：1920x1080 -> 1080x1920
+        // 但为了保持和客户端的兼容性，我们需要返回横屏格式
+        // 所以先做真正的旋转，然后再缩放回横屏尺寸
+        
+        // Step 1: 先做真正的90度旋转 (宽高互换)
+        YUVFrame rotatedFrame;
+        if (!rotateYUV90Clockwise(input, rotatedFrame)) {
+            BOOST_LOG(error) << "[CROP-ROTATE-FAST] Failed to rotate frame";
+            return false;
+        }
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Step 1: Rotated " << input.width << "x" << input.height 
+                       << " -> " << rotatedFrame.width << "x" << rotatedFrame.height;
+        
+        // Step 2: 将旋转后的竖屏内容缩放回横屏尺寸
+        output.width = inputWidth;   // 保持原始横屏宽度
+        output.height = inputHeight; // 保持原始横屏高度
         output.yStride = inputWidth;
         output.uvStride = inputWidth / 2;
         
@@ -816,45 +830,62 @@ namespace video_rotation {
         std::fill(output.uData.begin(), output.uData.end(), 128);  // 中性色度
         std::fill(output.vData.begin(), output.vData.end(), 128);  // 中性色度
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Step 1: Direct rotation without complex cropping...";
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Step 2: Scaling rotated frame to fit original size...";
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Rotated size: " << rotatedFrame.width << "x" << rotatedFrame.height;
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Target size: " << output.width << "x" << output.height;
         
-        // 简化策略：直接对整个帧进行90度旋转，不做裁剪
-        // 这样能最大化保留内容，且性能最优
+        // 计算缩放参数
+        float scaleX = (float)output.width / rotatedFrame.width;   // 1920/1080 = 1.777
+        float scaleY = (float)output.height / rotatedFrame.height; // 1080/1920 = 0.5625
+        float scale = std::min(scaleX, scaleY); // 使用较小的缩放系数保持宽高比
         
-        // 旋转Y分量 - 直接像素映射
-        for (int y = 0; y < inputHeight; y++) {
-            for (int x = 0; x < inputWidth; x++) {
-                int srcIndex = y * inputWidth + x;
-                // 90度顺时针旋转公式：(x,y) -> (inputHeight-1-y, x)
-                int dstX = inputHeight - 1 - y;
-                int dstY = x;
+        int scaledWidth = (int)(rotatedFrame.width * scale);
+        int scaledHeight = (int)(rotatedFrame.height * scale);
+        int offsetX = (output.width - scaledWidth) / 2;
+        int offsetY = (output.height - scaledHeight) / 2;
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scale factor: " << scale;
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scaled size: " << scaledWidth << "x" << scaledHeight;
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Offset: (" << offsetX << ", " << offsetY << ")";
+        
+        // 使用简化的最近邻插值进行缩放（高效但质量可接受）
+        for (int dstY = 0; dstY < output.height; dstY++) {
+            for (int dstX = 0; dstX < output.width; dstX++) {
+                // 计算在旋转后帧中的对应位置
+                int srcX = (int)((dstX - offsetX) / scale);
+                int srcY = (int)((dstY - offsetY) / scale);
                 
-                // 边界检查：确保旋转后的坐标在有效范围内
-                if (dstX >= 0 && dstX < inputWidth && dstY >= 0 && dstY < inputHeight) {
-                    int dstIndex = dstY * inputWidth + dstX;
-                    if (srcIndex < input.yData.size() && dstIndex < output.yData.size()) {
-                        output.yData[dstIndex] = input.yData[srcIndex];
+                // 边界检查
+                if (srcX >= 0 && srcX < rotatedFrame.width && srcY >= 0 && srcY < rotatedFrame.height) {
+                    int srcIndex = srcY * rotatedFrame.width + srcX;
+                    int dstIndex = dstY * output.width + dstX;
+                    
+                    if (srcIndex < rotatedFrame.yData.size() && dstIndex < output.yData.size()) {
+                        output.yData[dstIndex] = rotatedFrame.yData[srcIndex];
                     }
                 }
             }
         }
         
-        // 旋转UV分量 - 使用相同的简化策略
-        int uvWidth = inputWidth / 2;
-        int uvHeight = inputHeight / 2;
+        // 缩放UV分量
+        int uvOutputWidth = output.width / 2;
+        int uvOutputHeight = output.height / 2;
+        int uvRotatedWidth = rotatedFrame.width / 2;
+        int uvRotatedHeight = rotatedFrame.height / 2;
         
-        for (int y = 0; y < uvHeight; y++) {
-            for (int x = 0; x < uvWidth; x++) {
-                int srcIndex = y * uvWidth + x;
-                int dstX = uvHeight - 1 - y;
-                int dstY = x;
+        for (int dstY = 0; dstY < uvOutputHeight; dstY++) {
+            for (int dstX = 0; dstX < uvOutputWidth; dstX++) {
+                int srcX = (int)(((dstX * 2) - offsetX) / scale / 2);
+                int srcY = (int)(((dstY * 2) - offsetY) / scale / 2);
                 
-                if (dstX >= 0 && dstX < uvWidth && dstY >= 0 && dstY < uvHeight) {
-                    int dstIndex = dstY * uvWidth + dstX;
-                    if (srcIndex < input.uData.size() && dstIndex < output.uData.size() &&
-                        srcIndex < input.vData.size() && dstIndex < output.vData.size()) {
-                        output.uData[dstIndex] = input.uData[srcIndex];
-                        output.vData[dstIndex] = input.vData[srcIndex];
+                if (srcX >= 0 && srcX < uvRotatedWidth && srcY >= 0 && srcY < uvRotatedHeight) {
+                    int srcIndex = srcY * uvRotatedWidth + srcX;
+                    int dstIndex = dstY * uvOutputWidth + dstX;
+                    
+                    if (srcIndex < rotatedFrame.uData.size() && dstIndex < output.uData.size() &&
+                        srcIndex < rotatedFrame.vData.size() && dstIndex < output.vData.size()) {
+                        output.uData[dstIndex] = rotatedFrame.uData[srcIndex];
+                        output.vData[dstIndex] = rotatedFrame.vData[srcIndex];
                     }
                 }
             }
