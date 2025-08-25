@@ -11,6 +11,7 @@
 #include "moonlight-common-c/src/input.h"
 #include "video_colorspace.h"
 #include "video_rotation.h"
+#include "practical_rotation.h"
 
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
@@ -39,7 +40,7 @@ static std::atomic<bool> isCleaningUp(false);
 static std::atomic<bool> isTaskPoolRunning(false);
 
 // 视频旋转功能控制
-static std::atomic<bool> enableVideoRotation(false);
+static std::atomic<bool> enableVideoRotation(true); // 硬编码启用旋转功能
 static std::vector<uint8_t> globalCodecConfigData;
 
 /// Create a Java Integer object
@@ -879,12 +880,12 @@ namespace sunshine_callbacks {
 
                         // 检查是否启用了视频旋转功能
                         if (true) {
-                            BOOST_LOG(debug) << "Applying video rotation to frame";
+                            BOOST_LOG(verbose) << "Video rotation enabled, processing frame";
                             
-                            // 获取编码格式
-                            const char* mimeType = config.videoFormat == 1 ? "video/hevc" : "video/avc";
+                            // 使用实用的旋转方案，避免解码问题
+                            std::vector<uint8_t> processedData;
                             
-                            // 对非配置帧进行旋转处理
+                            // 对非配置帧进行处理
                             std::vector<uint8_t> frameOnlyData;
                             if (isKeyFrame ) {
                                 // 提取纯帧数据（排除SPS/PPS）
@@ -893,29 +894,23 @@ namespace sunshine_callbacks {
                                 frameOnlyData = frameData;
                             }
                             
-                            std::vector<uint8_t> rotatedData;
-                            if (video_rotation::rotateVideoFrame(
-                                frameOnlyData,
-                                globalCodecConfigData,
-                                mimeType,
-                                config.width, config.height,
-                                config.bitrate * 1000,
-                                config.framerate,
-                                rotatedData)) {
-                                    
-                                BOOST_LOG(debug) << "Frame rotation successful, new size: " << rotatedData.size();
+                            bool processingSuccess = practical_rotation::processVideoFrame(
+                                frameOnlyData, processedData);
+                            
+                            if (processingSuccess && !processedData.empty()) {
+                                BOOST_LOG(verbose) << "Frame processing successful";
                                 
-                                // 使用旋转后的数据
+                                // 使用处理后的数据
                                 if (isKeyFrame) {
-                                    // 重新组合配置数据和旋转后的帧
+                                    // 重新组合配置数据和处理后的帧
                                     frameData.clear();
-                                    frameData.insert(frameData.end(), globalCodecConfigData.begin(), globalCodecConfigData.end());
-                                    frameData.insert(frameData.end(), rotatedData.begin(), rotatedData.end());
+                                    frameData.insert(frameData.end(), codecConfigData.begin(), codecConfigData.end());
+                                    frameData.insert(frameData.end(), processedData.begin(), processedData.end());
                                 } else {
-                                    frameData = rotatedData;
+                                    frameData = processedData;
                                 }
                             } else {
-                                BOOST_LOG(warning) << "Frame rotation failed, using original frame";
+                                BOOST_LOG(warning) << "Frame processing failed, using original frame";
                                 // 使用原始数据
                             }
                         }
@@ -1026,12 +1021,20 @@ namespace sunshine_callbacks {
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_enableVideoRotation(JNIEnv *env, jclass clazz, jboolean enable) {
+    // 硬编码启用旋转功能进行验证
     enableVideoRotation = true;
-    BOOST_LOG(info) << "Video rotation " << (enable ? "enabled" : "disabled");
+    practical_rotation::setRotationEnabled(true);
+    BOOST_LOG(info) << "Video rotation ENABLED (hardcoded for testing)";
+    BOOST_LOG(info) << "Note: Using practical rotation approach for function verification";
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_nightmare_sunshine_NativeBridge_isVideoRotationEnabled(JNIEnv *env, jclass clazz) {
-    return true;
+    return true; // 硬编码返回true进行功能验证
+}
+
+JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_getRotationStats(JNIEnv *env, jclass clazz) {
+    practical_rotation::logRotationStats();
 }
 

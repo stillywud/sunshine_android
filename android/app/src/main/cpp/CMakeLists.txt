@@ -16,6 +16,7 @@ add_library(
         SHARED
         sunshine.cpp
         video_rotation.cpp
+        practical_rotation.cpp
         logging.cpp
         network.cpp
         config.cpp

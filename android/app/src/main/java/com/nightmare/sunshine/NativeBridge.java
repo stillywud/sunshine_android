@@ -159,6 +159,11 @@ public class NativeBridge {
      * @return true-已启用, false-未启用
      */
     public static native boolean isVideoRotationEnabled();
+    
+    /**
+     * 获取视频旋转的统计信息（输出到日志）
+     */
+    public static native void getRotationStats();
 
     private static class PointerStatus {
         public float x = 0;
