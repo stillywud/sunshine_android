@@ -11,6 +11,15 @@ namespace practical_rotation {
     static std::atomic<bool> rotationEnabled{true}; // 硬编码启用旋转功能
     static std::atomic<int> totalFrames{0};
     static std::atomic<int> processedFrames{0};
+    static std::atomic<int> failedFrames{0};
+    
+    // 增加帧计数器用于检测画面更新
+    static std::atomic<uint64_t> lastFrameTimestamp{0};
+    static std::chrono::steady_clock::time_point lastProcessTime;
+    
+    // 性能优化模式：当检测到处理时间过长时启用
+    static std::atomic<bool> fastModeEnabled{false};
+    static std::atomic<int> slowFrameCount{0};
     
     // 存储编码配置信息
     static std::vector<uint8_t> cachedConfigData;
@@ -19,6 +28,23 @@ namespace practical_rotation {
     static int cachedHeight = 1920;
     static int cachedBitrate = 5000000; // 5Mbps
     static int cachedFramerate = 60;
+    
+    // 清理缓存和重置状态，用于解决画面切换时不更新的问题
+    void clearCache() {
+        totalFrames = 0;
+        processedFrames = 0;
+        failedFrames = 0;
+        lastFrameTimestamp = 0;
+        lastProcessTime = std::chrono::steady_clock::now();
+        
+        // 重置性能优化模式
+        fastModeEnabled = false;
+        slowFrameCount = 0;
+        
+        BOOST_LOG(info) << "[ROTATION-CACHE] Cache cleared, ready for new video stream";
+        BOOST_LOG(info) << "[ROTATION-CACHE] Performance optimization mode reset";
+        BOOST_LOG(info) << "[ROTATION-CACHE] This should resolve frame update issues";
+    }
     
     // 设置编码参数（从sunshine.cpp调用）
     void setEncodingParams(const std::vector<uint8_t>& configData,
@@ -105,6 +131,15 @@ namespace practical_rotation {
             
             auto startTime = std::chrono::high_resolution_clock::now();
             
+            // 性能检测：如果之前的帧处理时间过长，启用快速模式
+            if (fastModeEnabled) {
+                BOOST_LOG(warning) << "[ROTATION-FAST] Fast mode enabled due to performance issues";
+                BOOST_LOG(warning) << "[ROTATION-FAST] Skipping complex rotation to reduce latency";
+                BOOST_LOG(warning) << "[ROTATION-FAST] Frame " << totalFrames << " using original data";
+                outputData = encodedData;
+                return true;
+            }
+            
             BOOST_LOG(info) << "[ROTATION-PROCESS] Starting video_rotation::rotateVideoFrame...";
             BOOST_LOG(info) << "[ROTATION-PROCESS] Input frame parameters:";
             BOOST_LOG(info) << "[ROTATION-PROCESS]   - Encoded frame size: " << encodedData.size() << " bytes";
@@ -127,7 +162,31 @@ namespace practical_rotation {
             auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
             
+            // 性能监控：如果处理时间超过100ms，记录为慢帧
+            if (duration.count() > 100) {
+                slowFrameCount++;
+                BOOST_LOG(warning) << "[ROTATION-PERF] Slow frame detected: " << duration.count() << "ms (frame " << totalFrames << ")";
+                BOOST_LOG(warning) << "[ROTATION-PERF] Slow frame count: " << slowFrameCount << "/" << totalFrames;
+                
+                // 如果连续3帧或耵50%的帧都过慢，启用快速模式
+                if (slowFrameCount >= 3 || (totalFrames > 10 && slowFrameCount * 2 > totalFrames)) {
+                    fastModeEnabled = true;
+                    BOOST_LOG(error) << "[ROTATION-PERF] CRITICAL: Enabling fast mode due to consistent slow performance!";
+                    BOOST_LOG(error) << "[ROTATION-PERF] This will disable rotation to improve client responsiveness";
+                    BOOST_LOG(error) << "[ROTATION-PERF] Slow frames: " << slowFrameCount << "/" << totalFrames;
+                }
+            }
+            
             if (rotationSuccess && !rotatedData.empty()) {
+                // 验证输出数据的合理性，防止损坏的帧数据
+                if (rotatedData.size() < 1000) {
+                    BOOST_LOG(error) << "[ROTATION-QUALITY] Output frame too small: " << rotatedData.size() << " bytes";
+                    BOOST_LOG(error) << "[ROTATION-QUALITY] This may indicate encoding failure - using original frame";
+                    outputData = encodedData;
+                    failedFrames++;
+                    return true;
+                }
+                
                 outputData = rotatedData;
                 processedFrames++;
                 
@@ -137,10 +196,12 @@ namespace practical_rotation {
                 BOOST_LOG(info) << "[ROTATION-SUCCESS]   - Output size: " << outputData.size() << " bytes";
                 BOOST_LOG(info) << "[ROTATION-SUCCESS] ==== Frame " << totalFrames << " Processing END (SUCCESS) ====";
                 
-                // 每10帧记录一次统计信息
+                // 每10帧记录一次统计信息，包括失败率
                 if (totalFrames % 10 == 0) {
+                    float successRate = (float)processedFrames / totalFrames * 100.0f;
                     BOOST_LOG(info) << "[ROTATION-STATS] Progress: " << processedFrames << "/" << totalFrames 
-                                   << " frames successfully rotated, avg time: " << duration.count() << "ms";
+                                   << " frames successfully rotated (" << successRate << "%), "
+                                   << "failed: " << failedFrames << ", avg time: " << duration.count() << "ms";
                 }
                 
                 return true;
@@ -151,6 +212,7 @@ namespace practical_rotation {
                 BOOST_LOG(error) << "[ROTATION-FAILED]   - Processing time: " << duration.count() << "ms";
                 BOOST_LOG(error) << "[ROTATION-FAILED]   - Using original frame as fallback";
                 outputData = encodedData;
+                failedFrames++;
                 BOOST_LOG(info) << "[ROTATION-FAILED] ==== Frame " << totalFrames << " Processing END (FAILED) ====";
                 return true; // 返回true但使用原始数据
             }

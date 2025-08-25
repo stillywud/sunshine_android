@@ -56,6 +56,11 @@ namespace practical_rotation {
      */
     void logRotationStats();
 
+    /**
+     * 清理缓存和重置状态，用于解决画面切换时不更新的问题
+     */
+    void clearCache();
+
 } // namespace practical_rotation
 
 #endif // PRACTICAL_ROTATION_H
