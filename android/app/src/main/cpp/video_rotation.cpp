@@ -732,25 +732,36 @@ namespace video_rotation {
         croppedFrame.uData.resize((cropWidth * cropHeight) / 4);
         croppedFrame.vData.resize((cropWidth * cropHeight) / 4);
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 1: Cropping YUV data...";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 1: Cropping YUV data with stride handling...";
         
-        // 裁剪Y分量
+        // 裁剪Y分量 - 使用安全的行复制方式
         for (int y = 0; y < cropHeight; y++) {
-            for (int x = 0; x < cropWidth; x++) {
-                int srcX = cropStartX + x;
-                int srcY = cropStartY + y;
-                int srcIndex = srcY * inputWidth + srcX;
-                int dstIndex = y * cropWidth + x;
+            int srcY = cropStartY + y;
+            if (srcY >= 0 && srcY < inputHeight) {
+                // 使用memcpy进行整行复制，提高效率并避免像素错位
+                int srcStartX = cropStartX;
+                int copyWidth = cropWidth;
                 
-                if (srcX >= 0 && srcX < inputWidth && srcY >= 0 && srcY < inputHeight) {
-                    croppedFrame.yData[dstIndex] = input.yData[srcIndex];
-                } else {
-                    croppedFrame.yData[dstIndex] = 0; // 填充黑色
+                // 边界检查和调整
+                if (srcStartX < 0) {
+                    copyWidth += srcStartX;
+                    srcStartX = 0;
+                }
+                if (srcStartX + copyWidth > inputWidth) {
+                    copyWidth = inputWidth - srcStartX;
+                }
+                
+                if (copyWidth > 0) {
+                    int srcOffset = srcY * inputWidth + srcStartX;
+                    int dstOffset = y * cropWidth + (srcStartX - cropStartX);
+                    
+                    // 安全复制
+                    memcpy(&croppedFrame.yData[dstOffset], &input.yData[srcOffset], copyWidth);
                 }
             }
         }
         
-        // 裁剪U和V分量（色度）
+        // 裁剪U和V分量（色度）- 使用相同的安全复制方式
         int uvCropWidth = cropWidth / 2;
         int uvCropHeight = cropHeight / 2;
         int uvCropStartX = cropStartX / 2;
@@ -759,18 +770,27 @@ namespace video_rotation {
         int uvInputHeight = inputHeight / 2;
         
         for (int y = 0; y < uvCropHeight; y++) {
-            for (int x = 0; x < uvCropWidth; x++) {
-                int srcX = uvCropStartX + x;
-                int srcY = uvCropStartY + y;
-                int srcIndex = srcY * uvInputWidth + srcX;
-                int dstIndex = y * uvCropWidth + x;
+            int srcY = uvCropStartY + y;
+            if (srcY >= 0 && srcY < uvInputHeight) {
+                int srcStartX = uvCropStartX;
+                int copyWidth = uvCropWidth;
                 
-                if (srcX >= 0 && srcX < uvInputWidth && srcY >= 0 && srcY < uvInputHeight) {
-                    croppedFrame.uData[dstIndex] = input.uData[srcIndex];
-                    croppedFrame.vData[dstIndex] = input.vData[srcIndex];
-                } else {
-                    croppedFrame.uData[dstIndex] = 128; // 色度中性值
-                    croppedFrame.vData[dstIndex] = 128;
+                // 边界检查和调整
+                if (srcStartX < 0) {
+                    copyWidth += srcStartX;
+                    srcStartX = 0;
+                }
+                if (srcStartX + copyWidth > uvInputWidth) {
+                    copyWidth = uvInputWidth - srcStartX;
+                }
+                
+                if (copyWidth > 0) {
+                    int srcOffset = srcY * uvInputWidth + srcStartX;
+                    int dstOffset = y * uvCropWidth + (srcStartX - uvCropStartX);
+                    
+                    // 安全复制U和V分量
+                    memcpy(&croppedFrame.uData[dstOffset], &input.uData[srcOffset], copyWidth);
+                    memcpy(&croppedFrame.vData[dstOffset], &input.vData[srcOffset], copyWidth);
                 }
             }
         }
@@ -786,8 +806,8 @@ namespace video_rotation {
         }
         BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 2 completed - rotated to " << rotatedFrame.width << "x" << rotatedFrame.height;
         
-        // Step 3: 将旋转后的帧填充回原始尺寸
-        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 3: Filling rotated frame back to " << inputWidth << "x" << inputHeight << "...";
+        // Step 3: 将旋转后的帧缩放填充回原始尺寸
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 3: Scaling and filling rotated frame to " << inputWidth << "x" << inputHeight << "...";
         
         // 初始化输出帧为原始尺寸
         output.width = inputWidth;
@@ -805,50 +825,110 @@ namespace video_rotation {
         std::fill(output.uData.begin(), output.uData.end(), 128); // U=128中性
         std::fill(output.vData.begin(), output.vData.end(), 128); // V=128中性
         
-        // 计算旋转后帧在输出帧中的位置（居中放置）
-        int rotatedWidth = rotatedFrame.width;   // 应该是1080
-        int rotatedHeight = rotatedFrame.height; // 应该是1080
+        // 计算缩放参数：将旋转后的帧缩放以填满整个屏幕
+        int rotatedWidth = rotatedFrame.width;
+        int rotatedHeight = rotatedFrame.height;
         
-        int fillStartX = (inputWidth - rotatedWidth) / 2;   // (1920-1080)/2 = 420
-        int fillStartY = (inputHeight - rotatedHeight) / 2; // (1080-1080)/2 = 0
+        // 使用等比例缩放，保持宽高比，填满整个屏幕
+        float scaleX = (float)inputWidth / rotatedWidth;
+        float scaleY = (float)inputHeight / rotatedHeight;
+        float scale = std::max(scaleX, scaleY); // 使用较大的缩放系数以填满屏幕
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Fill parameters:";
+        int scaledWidth = (int)(rotatedWidth * scale);
+        int scaledHeight = (int)(rotatedHeight * scale);
+        
+        // 计算居中偏移
+        int offsetX = (inputWidth - scaledWidth) / 2;
+        int offsetY = (inputHeight - scaledHeight) / 2;
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Scaling parameters:";
         BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Rotated frame: " << rotatedWidth << "x" << rotatedHeight;
-        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Fill position: (" << fillStartX << ", " << fillStartY << ")";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Scale factors: X=" << scaleX << ", Y=" << scaleY << ", chosen=" << scale;
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Scaled size: " << scaledWidth << "x" << scaledHeight;
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Offset: (" << offsetX << ", " << offsetY << ")";
         
-        // 填充Y分量
-        for (int y = 0; y < rotatedHeight; y++) {
-            for (int x = 0; x < rotatedWidth; x++) {
-                int dstX = fillStartX + x;
-                int dstY = fillStartY + y;
+        // 使用双线性插值进行缩放填充Y分量
+        for (int dstY = 0; dstY < inputHeight; dstY++) {
+            for (int dstX = 0; dstX < inputWidth; dstX++) {
+                // 计算在旋转后帧中的对应位置
+                float srcX = (dstX - offsetX) / scale;
+                float srcY = (dstY - offsetY) / scale;
                 
-                if (dstX >= 0 && dstX < inputWidth && dstY >= 0 && dstY < inputHeight) {
-                    int srcIndex = y * rotatedWidth + x;
-                    int dstIndex = dstY * inputWidth + dstX;
-                    output.yData[dstIndex] = rotatedFrame.yData[srcIndex];
+                // 边界检查
+                if (srcX >= 0 && srcX < rotatedWidth - 1 && srcY >= 0 && srcY < rotatedHeight - 1) {
+                    // 双线性插值
+                    int x1 = (int)srcX;
+                    int y1 = (int)srcY;
+                    int x2 = x1 + 1;
+                    int y2 = y1 + 1;
+                    
+                    float fx = srcX - x1;
+                    float fy = srcY - y1;
+                    
+                    // 获取四个邻近像素
+                    uint8_t p1 = rotatedFrame.yData[y1 * rotatedWidth + x1];
+                    uint8_t p2 = rotatedFrame.yData[y1 * rotatedWidth + x2];
+                    uint8_t p3 = rotatedFrame.yData[y2 * rotatedWidth + x1];
+                    uint8_t p4 = rotatedFrame.yData[y2 * rotatedWidth + x2];
+                    
+                    // 双线性插值计算
+                    float interpolated = p1 * (1 - fx) * (1 - fy) +
+                                       p2 * fx * (1 - fy) +
+                                       p3 * (1 - fx) * fy +
+                                       p4 * fx * fy;
+                    
+                    output.yData[dstY * inputWidth + dstX] = (uint8_t)interpolated;
                 }
+                // 否则保持黑色背景（已经初始化为0）
             }
         }
         
-        // 填充U和V分量
-        int uvRotatedWidth = rotatedWidth / 2;
-        int uvRotatedHeight = rotatedHeight / 2;
-        int uvFillStartX = fillStartX / 2;
-        int uvFillStartY = fillStartY / 2;
+        // 缩放填充U和V分量（使用相同的算法）
         int uvOutputWidth = inputWidth / 2;
         int uvOutputHeight = inputHeight / 2;
+        int uvRotatedWidth = rotatedWidth / 2;
+        int uvRotatedHeight = rotatedHeight / 2;
         
-        for (int y = 0; y < uvRotatedHeight; y++) {
-            for (int x = 0; x < uvRotatedWidth; x++) {
-                int dstX = uvFillStartX + x;
-                int dstY = uvFillStartY + y;
+        for (int dstY = 0; dstY < uvOutputHeight; dstY++) {
+            for (int dstX = 0; dstX < uvOutputWidth; dstX++) {
+                float srcX = (dstX * 2 - offsetX) / scale / 2;
+                float srcY = (dstY * 2 - offsetY) / scale / 2;
                 
-                if (dstX >= 0 && dstX < uvOutputWidth && dstY >= 0 && dstY < uvOutputHeight) {
-                    int srcIndex = y * uvRotatedWidth + x;
-                    int dstIndex = dstY * uvOutputWidth + dstX;
-                    output.uData[dstIndex] = rotatedFrame.uData[srcIndex];
-                    output.vData[dstIndex] = rotatedFrame.vData[srcIndex];
+                if (srcX >= 0 && srcX < uvRotatedWidth - 1 && srcY >= 0 && srcY < uvRotatedHeight - 1) {
+                    int x1 = (int)srcX;
+                    int y1 = (int)srcY;
+                    int x2 = x1 + 1;
+                    int y2 = y1 + 1;
+                    
+                    float fx = srcX - x1;
+                    float fy = srcY - y1;
+                    
+                    // U分量插值
+                    uint8_t u1 = rotatedFrame.uData[y1 * uvRotatedWidth + x1];
+                    uint8_t u2 = rotatedFrame.uData[y1 * uvRotatedWidth + x2];
+                    uint8_t u3 = rotatedFrame.uData[y2 * uvRotatedWidth + x1];
+                    uint8_t u4 = rotatedFrame.uData[y2 * uvRotatedWidth + x2];
+                    
+                    float uInterpolated = u1 * (1 - fx) * (1 - fy) +
+                                        u2 * fx * (1 - fy) +
+                                        u3 * (1 - fx) * fy +
+                                        u4 * fx * fy;
+                    
+                    // V分量插值
+                    uint8_t v1 = rotatedFrame.vData[y1 * uvRotatedWidth + x1];
+                    uint8_t v2 = rotatedFrame.vData[y1 * uvRotatedWidth + x2];
+                    uint8_t v3 = rotatedFrame.vData[y2 * uvRotatedWidth + x1];
+                    uint8_t v4 = rotatedFrame.vData[y2 * uvRotatedWidth + x2];
+                    
+                    float vInterpolated = v1 * (1 - fx) * (1 - fy) +
+                                        v2 * fx * (1 - fy) +
+                                        v3 * (1 - fx) * fy +
+                                        v4 * fx * fy;
+                    
+                    output.uData[dstY * uvOutputWidth + dstX] = (uint8_t)uInterpolated;
+                    output.vData[dstY * uvOutputWidth + dstX] = (uint8_t)vInterpolated;
                 }
+                // 否则保持中性色度（已经初始化为128）
             }
         }
         
