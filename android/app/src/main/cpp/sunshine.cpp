@@ -854,6 +854,17 @@ namespace sunshine_callbacks {
                         codecConfigData.assign(buffer, buffer + bufferSize);
                         // 保存全局配置数据供旋转功能使用
                         globalCodecConfigData = codecConfigData;
+                        
+                        // 传递编码参数给practical_rotation模块
+                        const char* mimeType = config.videoFormat == 1 ? "video/hevc" : "video/avc";
+                        practical_rotation::setEncodingParams(
+                            globalCodecConfigData,
+                            mimeType,
+                            config.width, config.height,
+                            config.bitrate * 1000,
+                            config.framerate
+                        );
+                        
                         BOOST_LOG(info) << "Saved complete codec configuration data, size: " << codecConfigData.size();
                     } else {
                         // Regular encoded frame
