@@ -136,7 +136,9 @@ namespace practical_rotation {
             
             auto startTime = std::chrono::high_resolution_clock::now();
             
-            // 性能检测：如果之前的帧处理时间过长，启用快速模式
+            // 【强制旋转模式】完全禁用快速模式，确保旋转功能始终工作
+            // 注释掉快速模式检查，强制进行旋转处理
+            /*
             if (fastModeEnabled) {
                 BOOST_LOG(warning) << "[ROTATION-FAST] Fast mode is ACTIVE - rotation processing DISABLED";
                 BOOST_LOG(warning) << "[ROTATION-FAST] Reason: Performance threshold exceeded (" << slowFrameCount << " slow frames out of " << totalFrames << ")";
@@ -145,6 +147,12 @@ namespace practical_rotation {
                 outputData = encodedData;
                 return true;
             }
+            */
+            
+            BOOST_LOG(warning) << "[ROTATION-FORCE] === 强制旋转模式激活 ===";
+            BOOST_LOG(warning) << "[ROTATION-FORCE] Fast mode is DISABLED - rotation will ALWAYS process";
+            BOOST_LOG(warning) << "[ROTATION-FORCE] This ensures rotation works regardless of performance";
+            BOOST_LOG(warning) << "[ROTATION-FORCE] Frame " << totalFrames << " will be forcibly rotated";
             
             BOOST_LOG(info) << "[ROTATION-PROCESS] Starting video_rotation::rotateVideoFrame...";
             BOOST_LOG(info) << "[ROTATION-PROCESS] Input frame parameters:";
@@ -208,6 +216,31 @@ namespace practical_rotation {
                     outputData = encodedData;
                     failedFrames++;
                     return true;
+                }
+                
+                // 【新增诊断】添加详细的输出质量检测
+                BOOST_LOG(warning) << "[ROTATION-QUALITY] === 输出质量诊断 ===";
+                BOOST_LOG(warning) << "[ROTATION-QUALITY] Input size: " << encodedData.size() << " bytes";
+                BOOST_LOG(warning) << "[ROTATION-QUALITY] Output size: " << rotatedData.size() << " bytes";
+                BOOST_LOG(warning) << "[ROTATION-QUALITY] Size change: " << ((float)rotatedData.size() / encodedData.size() * 100) << "%";
+                
+                // 检查输出数据的分布，帮助识别颜色问题
+                if (rotatedData.size() >= 100) {
+                    int zeroBytes = 0, maxBytes = 0;
+                    for (int i = 0; i < 100; i++) {
+                        if (rotatedData[i] == 0) zeroBytes++;
+                        if (rotatedData[i] == 255) maxBytes++;
+                    }
+                    BOOST_LOG(warning) << "[ROTATION-QUALITY] Sample analysis (first 100 bytes):";
+                    BOOST_LOG(warning) << "[ROTATION-QUALITY]   - Zero bytes: " << zeroBytes << "/100";
+                    BOOST_LOG(warning) << "[ROTATION-QUALITY]   - Max bytes (255): " << maxBytes << "/100";
+                    
+                    if (zeroBytes > 50) {
+                        BOOST_LOG(error) << "[ROTATION-QUALITY] WARNING: Too many zero bytes, may cause color issues!";
+                    }
+                    if (maxBytes > 50) {
+                        BOOST_LOG(error) << "[ROTATION-QUALITY] WARNING: Too many max bytes, may cause overexposure!";
+                    }
                 }
                 
                 outputData = rotatedData;

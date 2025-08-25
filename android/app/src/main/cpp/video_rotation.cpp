@@ -834,60 +834,84 @@ namespace video_rotation {
         BOOST_LOG(info) << "[CROP-ROTATE-FAST] Rotated size: " << rotatedFrame.width << "x" << rotatedFrame.height;
         BOOST_LOG(info) << "[CROP-ROTATE-FAST] Target size: " << output.width << "x" << output.height;
         
-        // 计算缩放参数
+        // 【修复缩放逻辑】使用更大的缩放系数填满全屏
         float scaleX = (float)output.width / rotatedFrame.width;   // 1920/1080 = 1.777
         float scaleY = (float)output.height / rotatedFrame.height; // 1080/1920 = 0.5625
-        float scale = std::min(scaleX, scaleY); // 使用较小的缩放系数保持宽高比
+        
+        // 【关键修复】使用更大的缩放系数以填满整个屏幕，而不是保持宽高比
+        float scale = std::max(scaleX, scaleY); // 使用较大的缩放系数填满屏幕
+        
+        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] === 填满全屏缩放策略 ===";
+        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] ScaleX: " << scaleX << ", ScaleY: " << scaleY;
+        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] Using MAX scale: " << scale << " (not min to fill screen)";
+        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] This will fill the entire screen, cropping excess content";
         
         int scaledWidth = (int)(rotatedFrame.width * scale);
         int scaledHeight = (int)(rotatedFrame.height * scale);
         int offsetX = (output.width - scaledWidth) / 2;
         int offsetY = (output.height - scaledHeight) / 2;
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scale factor: " << scale;
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scale factor: " << scale << " (FILL SCREEN MODE)";
         BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scaled size: " << scaledWidth << "x" << scaledHeight;
         BOOST_LOG(info) << "[CROP-ROTATE-FAST] Offset: (" << offsetX << ", " << offsetY << ")";
+        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Note: Using fill-screen scaling, content may be cropped";
         
-        // 使用简化的最近邻插值进行缩放（高效但质量可接受）
+        // 【改进缩放算法】正确处理溢出边界的情况
         for (int dstY = 0; dstY < output.height; dstY++) {
             for (int dstX = 0; dstX < output.width; dstX++) {
                 // 计算在旋转后帧中的对应位置
-                int srcX = (int)((dstX - offsetX) / scale);
-                int srcY = (int)((dstY - offsetY) / scale);
+                float srcXf = (dstX - offsetX) / scale;
+                float srcYf = (dstY - offsetY) / scale;
+                int srcX = (int)srcXf;
+                int srcY = (int)srcYf;
                 
-                // 边界检查
-                if (srcX >= 0 && srcX < rotatedFrame.width && srcY >= 0 && srcY < rotatedFrame.height) {
+                // 更严格的边界检查，避免负数索引
+                if (srcX >= 0 && srcX < rotatedFrame.width && 
+                    srcY >= 0 && srcY < rotatedFrame.height) {
                     int srcIndex = srcY * rotatedFrame.width + srcX;
                     int dstIndex = dstY * output.width + dstX;
                     
-                    if (srcIndex < rotatedFrame.yData.size() && dstIndex < output.yData.size()) {
+                    if (srcIndex >= 0 && srcIndex < rotatedFrame.yData.size() && 
+                        dstIndex >= 0 && dstIndex < output.yData.size()) {
                         output.yData[dstIndex] = rotatedFrame.yData[srcIndex];
                     }
                 }
+                // 如果超出边界，保持默认的黑色值（已初始化为16）
             }
         }
         
-        // 缩放UV分量
+        // 【改进UV分量缩放】使用相同的填满全屏策略
         int uvOutputWidth = output.width / 2;
         int uvOutputHeight = output.height / 2;
         int uvRotatedWidth = rotatedFrame.width / 2;
         int uvRotatedHeight = rotatedFrame.height / 2;
         
+        BOOST_LOG(info) << "[CROP-ROTATE-UV] Processing UV components with fill-screen strategy...";
+        BOOST_LOG(info) << "[CROP-ROTATE-UV] UV Output: " << uvOutputWidth << "x" << uvOutputHeight;
+        BOOST_LOG(info) << "[CROP-ROTATE-UV] UV Rotated: " << uvRotatedWidth << "x" << uvRotatedHeight;
+        
         for (int dstY = 0; dstY < uvOutputHeight; dstY++) {
             for (int dstX = 0; dstX < uvOutputWidth; dstX++) {
-                int srcX = (int)(((dstX * 2) - offsetX) / scale / 2);
-                int srcY = (int)(((dstY * 2) - offsetY) / scale / 2);
+                // 直接使用相同的缩放系数和偏移，但需要针对UV分辨率调整
+                float srcXf = (dstX * 2 - offsetX) / scale / 2;
+                float srcYf = (dstY * 2 - offsetY) / scale / 2;
+                int srcX = (int)srcXf;
+                int srcY = (int)srcYf;
                 
-                if (srcX >= 0 && srcX < uvRotatedWidth && srcY >= 0 && srcY < uvRotatedHeight) {
+                if (srcX >= 0 && srcX < uvRotatedWidth && 
+                    srcY >= 0 && srcY < uvRotatedHeight) {
                     int srcIndex = srcY * uvRotatedWidth + srcX;
                     int dstIndex = dstY * uvOutputWidth + dstX;
                     
-                    if (srcIndex < rotatedFrame.uData.size() && dstIndex < output.uData.size() &&
-                        srcIndex < rotatedFrame.vData.size() && dstIndex < output.vData.size()) {
+                    if (srcIndex >= 0 && srcIndex < rotatedFrame.uData.size() && 
+                        dstIndex >= 0 && dstIndex < output.uData.size() &&
+                        srcIndex < rotatedFrame.vData.size() && 
+                        dstIndex < output.vData.size()) {
                         output.uData[dstIndex] = rotatedFrame.uData[srcIndex];
                         output.vData[dstIndex] = rotatedFrame.vData[srcIndex];
                     }
                 }
+                // 如果超出边界，保持默认的中性色度值（已初始化为128）
             }
         }
         
