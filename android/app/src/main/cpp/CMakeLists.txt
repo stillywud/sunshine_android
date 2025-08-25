@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24.0)
 
 project("sunshine")
 
-#set(CMAKE_CXX_FLAGS   "-g")                     # 调试信息
+set(CMAKE_CXX_FLAGS   "-g")                     # 调试信息
 
 
 include(dependencies/Boost_Sunshine.cmake)
@@ -15,6 +15,7 @@ add_library(
         sunshine
         SHARED
         sunshine.cpp
+        video_rotation.cpp
         logging.cpp
         network.cpp
         config.cpp

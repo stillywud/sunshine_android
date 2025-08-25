@@ -146,6 +146,20 @@ public class NativeBridge {
 
     public static native void enableH265();
 
+    // ====================== 视频旋转功能 ======================
+    
+    /**
+     * 启用或禁用视频旋转功能
+     * @param enable true-启用旋转, false-禁用旋转
+     */
+    public static native void enableVideoRotation(boolean enable);
+    
+    /**
+     * 检查视频旋转功能是否已启用
+     * @return true-已启用, false-未启用
+     */
+    public static native boolean isVideoRotationEnabled();
+
     private static class PointerStatus {
         public float x = 0;
 

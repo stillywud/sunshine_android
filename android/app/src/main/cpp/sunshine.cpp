@@ -10,6 +10,7 @@
 #include "audio.h"
 #include "moonlight-common-c/src/input.h"
 #include "video_colorspace.h"
+#include "video_rotation.h"
 
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
@@ -36,6 +37,10 @@ static jobject globalAudioRecord = nullptr;
 static std::thread cleanupThread;
 static std::atomic<bool> isCleaningUp(false);
 static std::atomic<bool> isTaskPoolRunning(false);
+
+// 视频旋转功能控制
+static std::atomic<bool> enableVideoRotation(false);
+static std::vector<uint8_t> globalCodecConfigData;
 
 /// Create a Java Integer object
 jobject createJavaInt(JNIEnv *env, int value) {
@@ -846,6 +851,8 @@ namespace sunshine_callbacks {
                         // Codec configuration data (SPS/PPS)
                         BOOST_LOG(info) << "Received codec configuration data, size: " << bufferSize;
                         codecConfigData.assign(buffer, buffer + bufferSize);
+                        // 保存全局配置数据供旋转功能使用
+                        globalCodecConfigData = codecConfigData;
                         BOOST_LOG(info) << "Saved complete codec configuration data, size: " << codecConfigData.size();
                     } else {
                         // Regular encoded frame
@@ -853,22 +860,68 @@ namespace sunshine_callbacks {
                         BOOST_LOG(verbose) << "Received " << (isKeyFrame ? "key frame" : "regular frame") << ", size: " << bufferSize;
                         frameIndex++;
 
+                        // 准备帧数据
+                        std::vector<uint8_t> frameData;
+                        
                         if (isKeyFrame) {
                             // For key frames, prepend codec configuration data
                             if (!codecConfigData.empty()) {
-                                std::vector<uint8_t> frameData;
                                 frameData.insert(frameData.end(), codecConfigData.begin(), codecConfigData.end());
                                 frameData.insert(frameData.end(), buffer, buffer + bufferSize);
-                                BOOST_LOG(verbose) << "Sending key frame (with config data), total size: " << frameData.size();
-                                stream::postFrame(std::move(frameData), frameIndex, true, channel_data);
+                                BOOST_LOG(debug) << "Sending key frame (with config data), total size: " << frameData.size();
                             } else {
                                 BOOST_LOG(error) << "No codec configuration data, cannot send complete key frame";
+                                return; // 跳过这一帧
                             }
                         } else {
-                            std::vector<uint8_t> frameData;
                             frameData.insert(frameData.end(), buffer, buffer + bufferSize);
-                            stream::postFrame(std::move(frameData), frameIndex, false, channel_data);
                         }
+
+                        // 检查是否启用了视频旋转功能
+                        if (true) {
+                            BOOST_LOG(debug) << "Applying video rotation to frame";
+                            
+                            // 获取编码格式
+                            const char* mimeType = config.videoFormat == 1 ? "video/hevc" : "video/avc";
+                            
+                            // 对非配置帧进行旋转处理
+                            std::vector<uint8_t> frameOnlyData;
+                            if (isKeyFrame ) {
+                                // 提取纯帧数据（排除SPS/PPS）
+                                frameOnlyData.assign(buffer, buffer + bufferSize);
+                            } else {
+                                frameOnlyData = frameData;
+                            }
+                            
+                            std::vector<uint8_t> rotatedData;
+                            if (video_rotation::rotateVideoFrame(
+                                frameOnlyData,
+                                globalCodecConfigData,
+                                mimeType,
+                                config.width, config.height,
+                                config.bitrate * 1000,
+                                config.framerate,
+                                rotatedData)) {
+                                    
+                                BOOST_LOG(debug) << "Frame rotation successful, new size: " << rotatedData.size();
+                                
+                                // 使用旋转后的数据
+                                if (isKeyFrame) {
+                                    // 重新组合配置数据和旋转后的帧
+                                    frameData.clear();
+                                    frameData.insert(frameData.end(), globalCodecConfigData.begin(), globalCodecConfigData.end());
+                                    frameData.insert(frameData.end(), rotatedData.begin(), rotatedData.end());
+                                } else {
+                                    frameData = rotatedData;
+                                }
+                            } else {
+                                BOOST_LOG(warning) << "Frame rotation failed, using original frame";
+                                // 使用原始数据
+                            }
+                        }
+
+                        // 发送帧数据
+                        stream::postFrame(std::move(frameData), frameIndex, isKeyFrame, channel_data);
                     }
                 }
 
@@ -967,5 +1020,18 @@ namespace sunshine_callbacks {
             jvm->DetachCurrentThread();
         }
     }
+}
+
+// ====================== 新增视频旋转功能 JNI 接口 ======================
+
+JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_enableVideoRotation(JNIEnv *env, jclass clazz, jboolean enable) {
+    enableVideoRotation = true;
+    BOOST_LOG(info) << "Video rotation " << (enable ? "enabled" : "disabled");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_nightmare_sunshine_NativeBridge_isVideoRotationEnabled(JNIEnv *env, jclass clazz) {
+    return true;
 }
 
