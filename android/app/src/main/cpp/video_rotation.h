@@ -120,6 +120,15 @@ namespace video_rotation {
     bool rotateYUV90Clockwise(const YUVFrame& input, YUVFrame& output);
 
     /**
+     * 裁剪-旋转-填充YUV数据处理
+     * 从1920x1080横屏帧中截取中间的竖屏内容，旋转90°后重新填满1920x1080
+     * @param input 输入的横屏帧（包含黑边）
+     * @param output 输出的横屏帧（填满内容）
+     * @return 成功返回true
+     */
+    bool cropRotateFillYUV(const YUVFrame& input, YUVFrame& output);
+
+    /**
      * 完整的视频帧旋转处理
      * @param encodedData 输入的编码数据
      * @param configData SPS/PPS配置数据

@@ -689,6 +689,181 @@ namespace video_rotation {
         isInitialized = false;
     }
     
+    /**
+     * 裁剪-旋转-填充YUV数据处理
+     * 从1920x1080横屏帧中截取中间的竖屏内容，旋转90°后重新填满1920x1080
+     */
+    bool cropRotateFillYUV(const YUVFrame& input, YUVFrame& output) {
+        if (input.yData.empty() || input.uData.empty() || input.vData.empty()) {
+            BOOST_LOG(error) << "[CROP-ROTATE-FILL] Input YUV data is empty";
+            return false;
+        }
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] ==== CROP-ROTATE-FILL PROCESSING START ====";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Input frame: " << input.width << "x" << input.height << " (横屏帧含黑边)";
+        
+        // 计算裁剪区域：从1920x1080中截取中间的竖屏内容
+        int inputWidth = input.width;   // 1920
+        int inputHeight = input.height; // 1080
+        
+        // 假设竖屏内容占据横屏中间的正方形区域
+        int cropSize = std::min(inputWidth, inputHeight); // 取较小值作为裁剪尺寸
+        int cropWidth = cropSize;   // 1080
+        int cropHeight = cropSize;  // 1080
+        
+        // 计算裁剪起始位置（居中裁剪）
+        int cropStartX = (inputWidth - cropWidth) / 2;   // (1920-1080)/2 = 420
+        int cropStartY = (inputHeight - cropHeight) / 2; // (1080-1080)/2 = 0
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Crop parameters:";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Crop size: " << cropWidth << "x" << cropHeight;
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Crop start: (" << cropStartX << ", " << cropStartY << ")";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - This extracts portrait content from center";
+        
+        // 创建临时的裁剪帧
+        YUVFrame croppedFrame;
+        croppedFrame.width = cropWidth;
+        croppedFrame.height = cropHeight;
+        croppedFrame.yStride = cropWidth;
+        croppedFrame.uvStride = cropWidth / 2;
+        
+        // 分配裁剪帧内存
+        croppedFrame.yData.resize(cropWidth * cropHeight);
+        croppedFrame.uData.resize((cropWidth * cropHeight) / 4);
+        croppedFrame.vData.resize((cropWidth * cropHeight) / 4);
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 1: Cropping YUV data...";
+        
+        // 裁剪Y分量
+        for (int y = 0; y < cropHeight; y++) {
+            for (int x = 0; x < cropWidth; x++) {
+                int srcX = cropStartX + x;
+                int srcY = cropStartY + y;
+                int srcIndex = srcY * inputWidth + srcX;
+                int dstIndex = y * cropWidth + x;
+                
+                if (srcX >= 0 && srcX < inputWidth && srcY >= 0 && srcY < inputHeight) {
+                    croppedFrame.yData[dstIndex] = input.yData[srcIndex];
+                } else {
+                    croppedFrame.yData[dstIndex] = 0; // 填充黑色
+                }
+            }
+        }
+        
+        // 裁剪U和V分量（色度）
+        int uvCropWidth = cropWidth / 2;
+        int uvCropHeight = cropHeight / 2;
+        int uvCropStartX = cropStartX / 2;
+        int uvCropStartY = cropStartY / 2;
+        int uvInputWidth = inputWidth / 2;
+        int uvInputHeight = inputHeight / 2;
+        
+        for (int y = 0; y < uvCropHeight; y++) {
+            for (int x = 0; x < uvCropWidth; x++) {
+                int srcX = uvCropStartX + x;
+                int srcY = uvCropStartY + y;
+                int srcIndex = srcY * uvInputWidth + srcX;
+                int dstIndex = y * uvCropWidth + x;
+                
+                if (srcX >= 0 && srcX < uvInputWidth && srcY >= 0 && srcY < uvInputHeight) {
+                    croppedFrame.uData[dstIndex] = input.uData[srcIndex];
+                    croppedFrame.vData[dstIndex] = input.vData[srcIndex];
+                } else {
+                    croppedFrame.uData[dstIndex] = 128; // 色度中性值
+                    croppedFrame.vData[dstIndex] = 128;
+                }
+            }
+        }
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 1 completed - cropped to " << cropWidth << "x" << cropHeight;
+        
+        // Step 2: 旋转裁剪后的帧
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 2: Rotating cropped frame 90° clockwise...";
+        YUVFrame rotatedFrame;
+        if (!rotateYUV90Clockwise(croppedFrame, rotatedFrame)) {
+            BOOST_LOG(error) << "[CROP-ROTATE-FILL] Failed to rotate cropped frame";
+            return false;
+        }
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 2 completed - rotated to " << rotatedFrame.width << "x" << rotatedFrame.height;
+        
+        // Step 3: 将旋转后的帧填充回原始尺寸
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 3: Filling rotated frame back to " << inputWidth << "x" << inputHeight << "...";
+        
+        // 初始化输出帧为原始尺寸
+        output.width = inputWidth;
+        output.height = inputHeight;
+        output.yStride = inputWidth;
+        output.uvStride = inputWidth / 2;
+        
+        // 分配输出内存
+        output.yData.resize(inputWidth * inputHeight);
+        output.uData.resize((inputWidth * inputHeight) / 4);
+        output.vData.resize((inputWidth * inputHeight) / 4);
+        
+        // 先填充黑色背景
+        std::fill(output.yData.begin(), output.yData.end(), 0);   // Y=0表示黑色
+        std::fill(output.uData.begin(), output.uData.end(), 128); // U=128中性
+        std::fill(output.vData.begin(), output.vData.end(), 128); // V=128中性
+        
+        // 计算旋转后帧在输出帧中的位置（居中放置）
+        int rotatedWidth = rotatedFrame.width;   // 应该是1080
+        int rotatedHeight = rotatedFrame.height; // 应该是1080
+        
+        int fillStartX = (inputWidth - rotatedWidth) / 2;   // (1920-1080)/2 = 420
+        int fillStartY = (inputHeight - rotatedHeight) / 2; // (1080-1080)/2 = 0
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Fill parameters:";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Rotated frame: " << rotatedWidth << "x" << rotatedHeight;
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Fill position: (" << fillStartX << ", " << fillStartY << ")";
+        
+        // 填充Y分量
+        for (int y = 0; y < rotatedHeight; y++) {
+            for (int x = 0; x < rotatedWidth; x++) {
+                int dstX = fillStartX + x;
+                int dstY = fillStartY + y;
+                
+                if (dstX >= 0 && dstX < inputWidth && dstY >= 0 && dstY < inputHeight) {
+                    int srcIndex = y * rotatedWidth + x;
+                    int dstIndex = dstY * inputWidth + dstX;
+                    output.yData[dstIndex] = rotatedFrame.yData[srcIndex];
+                }
+            }
+        }
+        
+        // 填充U和V分量
+        int uvRotatedWidth = rotatedWidth / 2;
+        int uvRotatedHeight = rotatedHeight / 2;
+        int uvFillStartX = fillStartX / 2;
+        int uvFillStartY = fillStartY / 2;
+        int uvOutputWidth = inputWidth / 2;
+        int uvOutputHeight = inputHeight / 2;
+        
+        for (int y = 0; y < uvRotatedHeight; y++) {
+            for (int x = 0; x < uvRotatedWidth; x++) {
+                int dstX = uvFillStartX + x;
+                int dstY = uvFillStartY + y;
+                
+                if (dstX >= 0 && dstX < uvOutputWidth && dstY >= 0 && dstY < uvOutputHeight) {
+                    int srcIndex = y * uvRotatedWidth + x;
+                    int dstIndex = dstY * uvOutputWidth + dstX;
+                    output.uData[dstIndex] = rotatedFrame.uData[srcIndex];
+                    output.vData[dstIndex] = rotatedFrame.vData[srcIndex];
+                }
+            }
+        }
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Step 3 completed - filled back to " << output.width << "x" << output.height;
+        
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] Final result:";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Input: " << input.width << "x" << input.height << " (横屏帧含黑边)";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Cropped: " << cropWidth << "x" << cropHeight << " (竖屏内容)";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Rotated: " << rotatedWidth << "x" << rotatedHeight << " (旋转后)";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL]   - Output: " << output.width << "x" << output.height << " (填满横屏)";
+        BOOST_LOG(info) << "[CROP-ROTATE-FILL] ==== CROP-ROTATE-FILL PROCESSING SUCCESS ====";
+        
+        return true;
+    }
+    
     // ====================== YUV旋转算法实现 ======================
     
     bool rotateYUV90Clockwise(const YUVFrame& input, YUVFrame& output) {
@@ -808,14 +983,25 @@ namespace video_rotation {
                          int bitrate, int framerate,
                          std::vector<uint8_t>& outputData) {
         
-        BOOST_LOG(info) << "[VIDEO-ROTATION] ===== VIDEO FRAME ROTATION START =====";
+        BOOST_LOG(info) << "[VIDEO-ROTATION] ===== CROP-ROTATE-FILL PROCESSING START =====";
         BOOST_LOG(info) << "[VIDEO-ROTATION] Input parameters:";
         BOOST_LOG(info) << "[VIDEO-ROTATION]   - MIME: " << mimeType;
-        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Resolution: " << width << "x" << height;
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Input resolution: " << width << "x" << height << " (横屏帧，包含黑边)";
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Expected content: 中间竖屏内容，两边黑边";
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Target output: " << width << "x" << height << " (填满横屏)";
         BOOST_LOG(info) << "[VIDEO-ROTATION]   - Bitrate: " << bitrate << " bps";
         BOOST_LOG(info) << "[VIDEO-ROTATION]   - Framerate: " << framerate << " fps";
         BOOST_LOG(info) << "[VIDEO-ROTATION]   - Encoded data: " << encodedData.size() << " bytes";
         BOOST_LOG(info) << "[VIDEO-ROTATION]   - Config data: " << configData.size() << " bytes";
+        
+        // 计算截取区域：从1920x1080中截取中间的竖屏内容
+        int cropWidth = 1080;   // 竖屏内容的宽度
+        int cropHeight = 1080;  // 竖屏内容的高度（可能需要根据实际情况调整）
+        
+        BOOST_LOG(info) << "[VIDEO-ROTATION] Crop-Rotate-Fill strategy:";
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Crop region: " << cropWidth << "x" << cropHeight << " 从中间截取";
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - After 90° rotation: " << cropHeight << "x" << cropWidth;
+        BOOST_LOG(info) << "[VIDEO-ROTATION]   - Final fill: Scale to " << width << "x" << height;
         
         // 检查输入参数
         if (encodedData.empty()) {
@@ -861,34 +1047,35 @@ namespace video_rotation {
             // 释放解码器资源
             decoder.reset();
             
-            // 检查是否需要旋转
-            bool needRotation = (originalFrame.width < originalFrame.height); // 竖屏需要旋转
-            BOOST_LOG(info) << "[VIDEO-ROTATION] Rotation analysis:";
-            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Frame format: " << (needRotation ? "Portrait (需要旋转)" : "Landscape (无需旋转)");
-            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Width: " << originalFrame.width << ", Height: " << originalFrame.height;
+            // 对于1920x1080横屏帧，始终使用裁剪-旋转-填充处理
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Processing strategy: Crop-Rotate-Fill";
+            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Assumption: Landscape frame contains portrait content with black bars";
+            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Process: Extract center portrait → Rotate 90° → Fill landscape";
             
-            YUVFrame* finalFrame;
-            YUVFrame rotatedFrame;
+            YUVFrame finalFrame;
             
-            if (needRotation) {
-                // 3. 旋转YUV数据
-                BOOST_LOG(info) << "[VIDEO-ROTATION] Step 3: Rotating YUV data...";
-                if (!rotateYUV90Clockwise(originalFrame, rotatedFrame)) {
-                    BOOST_LOG(error) << "[VIDEO-ROTATION] Failed to rotate YUV data";
-                    return false;
-                }
-                BOOST_LOG(info) << "[VIDEO-ROTATION] Step 3 completed - YUV rotation successful";
-                finalFrame = &rotatedFrame;
-            } else {
-                // 3. 跳过旋转步骤
-                BOOST_LOG(info) << "[VIDEO-ROTATION] Step 3: Skipping rotation (already landscape format)";
-                finalFrame = &originalFrame;
+            // 3. 使用裁剪-旋转-填充处理
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Step 3: Applying crop-rotate-fill processing...";
+            if (!cropRotateFillYUV(originalFrame, finalFrame)) {
+                BOOST_LOG(error) << "[VIDEO-ROTATION] Failed to apply crop-rotate-fill processing";
+                return false;
             }
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Step 3 completed - crop-rotate-fill successful";
             
             // 4. 初始化编码器 (使用最终帧的尺寸)
             BOOST_LOG(info) << "[VIDEO-ROTATION] Step 4: Initializing encoder for final frame...";
-            BOOST_LOG(info) << "[VIDEO-ROTATION] Final frame dimensions: " << finalFrame->width << "x" << finalFrame->height;
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Final frame dimensions: " << finalFrame.width << "x" << finalFrame.height;
             BOOST_LOG(info) << "[VIDEO-ROTATION] Original dimensions were: " << width << "x" << height;
+            
+            // 确定编码器的输出尺寸
+            int encoderWidth = finalFrame.width;
+            int encoderHeight = finalFrame.height;
+            
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Encoder output configuration:";
+            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Encoder will output: " << encoderWidth << "x" << encoderHeight;
+            BOOST_LOG(info) << "[VIDEO-ROTATION]   - Format: " << (encoderWidth > encoderHeight ? "Landscape (横屏)" : "Portrait (竖屏)");
+            BOOST_LOG(info) << "[VIDEO-ROTATION]   - This matches client request for landscape display";
+            
             encoder = std::make_unique<VideoEncoder>();
             
             // 降低码率和复杂度以提高成功率
@@ -896,16 +1083,17 @@ namespace video_rotation {
             int adjustedFramerate = std::min(framerate, 30);   // 最多30fps
             BOOST_LOG(info) << "[VIDEO-ROTATION] Using adjusted parameters: bitrate=" << adjustedBitrate << ", fps=" << adjustedFramerate;
             
-            if (!encoder->initialize(mimeType, finalFrame->width, finalFrame->height, 
+            if (!encoder->initialize(mimeType, encoderWidth, encoderHeight, 
                                     adjustedBitrate, adjustedFramerate)) {
-                BOOST_LOG(error) << "[VIDEO-ROTATION] Failed to initialize encoder";
+                BOOST_LOG(error) << "[VIDEO-ROTATION] Failed to initialize encoder with target dimensions";
+                BOOST_LOG(error) << "[VIDEO-ROTATION] Target was: " << encoderWidth << "x" << encoderHeight;
                 return false;
             }
-            BOOST_LOG(info) << "[VIDEO-ROTATION] Step 4 completed - encoder initialized";
+            BOOST_LOG(info) << "[VIDEO-ROTATION] Step 4 completed - encoder initialized for " << encoderWidth << "x" << encoderHeight;
             
             // 5. 重新编码
             BOOST_LOG(info) << "[VIDEO-ROTATION] Step 5: Encoding final YUV...";
-            if (!encoder->encodeFromYUV(*finalFrame, outputData)) {
+            if (!encoder->encodeFromYUV(finalFrame, outputData)) {
                 BOOST_LOG(error) << "[VIDEO-ROTATION] Failed to encode final YUV";
                 return false;
             }

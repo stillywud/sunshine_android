@@ -65,28 +65,32 @@ namespace practical_rotation {
             return false;
         }
         
-        // 检查是否需要旋转：如果已经是横屏格式，直接返回原始数据
-        bool needRotation = (cachedWidth < cachedHeight); // 竖屏需要旋转
+        // 强制启用旋转处理：从1920x1080横屏帧中截取竖屏内容并旋转填满
+        bool needRotation = true; // 始终需要处理黑边和旋转
         
-        BOOST_LOG(info) << "[ROTATION-ANALYSIS] Frame format analysis:";
-        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Resolution: " << cachedWidth << "x" << cachedHeight;
-        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Format: " << (needRotation ? "Portrait (竖屏, 需要旋转)" : "Landscape (横屏, 无需旋转)");
-        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Action: " << (needRotation ? "Will rotate" : "Will skip rotation");
+        BOOST_LOG(info) << "[ROTATION-ANALYSIS] Frame processing analysis:";
+        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Input resolution: " << cachedWidth << "x" << cachedHeight << " (横屏格式)";
+        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Expected content: 竖屏内容显示在横屏中间，两边黑边";
+        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Processing plan: 截取中间竖屏内容 -> 旋转90° -> 重新填满1920x1080";
+        BOOST_LOG(info) << "[ROTATION-ANALYSIS]   - Output resolution: " << cachedWidth << "x" << cachedHeight << " (保持不变)";
         
-        if (!needRotation) {
-            BOOST_LOG(info) << "[ROTATION-SKIP] Frame is already landscape format, skipping rotation processing";
-            BOOST_LOG(info) << "[ROTATION-SKIP] Using original frame data to avoid unnecessary decode/encode";
-            outputData = encodedData;
-            processedFrames++; // 计为处理成功
-            
-            BOOST_LOG(info) << "[ROTATION-SUCCESS] Frame " << totalFrames << " processed successfully (no rotation needed)!";
-            BOOST_LOG(info) << "[ROTATION-SUCCESS]   - Processing time: 0ms (skipped)";
-            BOOST_LOG(info) << "[ROTATION-SUCCESS]   - Input size: " << encodedData.size() << " bytes";
-            BOOST_LOG(info) << "[ROTATION-SUCCESS]   - Output size: " << outputData.size() << " bytes";
-            BOOST_LOG(info) << "[ROTATION-SUCCESS] ==== Frame " << totalFrames << " Processing END (SKIPPED) ====";
-            
-            return true;
-        }
+        // 计算截取区域：假设竖屏内容在横屏中间
+        // 1920x1080横屏中的竖屏内容大约是中间的1080x1080区域
+        int cropWidth = 1080;   // 截取宽度（对应原始竖屏的宽度）
+        int cropHeight = 1080;  // 截取高度（对应原始竖屏的高度，可能需要调整）
+        int cropX = (1920 - cropWidth) / 2;  // 居中截取的X偏移
+        int cropY = 0;  // Y偏移，从顶部开始
+        
+        BOOST_LOG(info) << "[ROTATION-CROP] Crop region calculation:";
+        BOOST_LOG(info) << "[ROTATION-CROP]   - Crop area: " << cropWidth << "x" << cropHeight;
+        BOOST_LOG(info) << "[ROTATION-CROP]   - Crop offset: (" << cropX << ", " << cropY << ")";
+        BOOST_LOG(info) << "[ROTATION-CROP]   - This extracts portrait content from landscape frame";
+        
+        BOOST_LOG(info) << "[ROTATION-PROCESS] Starting crop-rotate-fill processing:";
+        BOOST_LOG(info) << "[ROTATION-PROCESS]   - Step 1: 解码1920x1080横屏帧";
+        BOOST_LOG(info) << "[ROTATION-PROCESS]   - Step 2: 截取中间" << cropWidth << "x" << cropHeight << "竖屏内容";
+        BOOST_LOG(info) << "[ROTATION-PROCESS]   - Step 3: 旋转90°变为" << cropHeight << "x" << cropWidth;
+        BOOST_LOG(info) << "[ROTATION-PROCESS]   - Step 4: 重新编码为1920x1080填满横屏";
         
         BOOST_LOG(info) << "[ROTATION-CONFIG] Using cached config:";
         BOOST_LOG(info) << "[ROTATION-CONFIG]   - MIME: " << cachedMimeType;
@@ -102,6 +106,13 @@ namespace practical_rotation {
             auto startTime = std::chrono::high_resolution_clock::now();
             
             BOOST_LOG(info) << "[ROTATION-PROCESS] Starting video_rotation::rotateVideoFrame...";
+            BOOST_LOG(info) << "[ROTATION-PROCESS] Input frame parameters:";
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - Encoded frame size: " << encodedData.size() << " bytes";
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - Config data size: " << cachedConfigData.size() << " bytes";
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - MIME type: " << cachedMimeType;
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - Current dimensions: " << cachedWidth << "x" << cachedHeight;
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - Expected output: " << cachedHeight << "x" << cachedWidth << " (rotated 90°)";
+            BOOST_LOG(info) << "[ROTATION-PROCESS]   - Bitrate: " << cachedBitrate << ", FPS: " << cachedFramerate;
             
             bool rotationSuccess = video_rotation::rotateVideoFrame(
                 encodedData,
