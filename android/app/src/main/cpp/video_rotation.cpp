@@ -784,144 +784,100 @@ namespace video_rotation {
     }
     
     /**
-     * 简化的裁剪-旋转-填充YUV数据处理（优化性能）
-     * 从1920x1080横屏帧中截取中间的竖屏内容，旋转90°后重新填满1920x1080
-     * 性能优化：移除复杂的双线性插倿，使用直接像素映射
+     * 真正的90度旋转方案：从横屏1920x1080中提取中间1080x1080正方形，旋转90度后输出1080x1080
+     * 避免双重处理（旋转+缩放）导致的画面变形和残影问题
      */
     bool cropRotateFillYUV(const YUVFrame& input, YUVFrame& output) {
+        BOOST_LOG(info) << "[REAL-ROTATE] ==== TRUE 90-DEGREE ROTATION (NO DOUBLE PROCESSING) ====\n";
+        BOOST_LOG(info) << "[REAL-ROTATE] Input: " << input.width << "x" << input.height;
+        
         if (input.yData.empty() || input.uData.empty() || input.vData.empty()) {
-            BOOST_LOG(error) << "[CROP-ROTATE-FAST] Input YUV data is empty";
+            BOOST_LOG(error) << "[REAL-ROTATE] Invalid input YUV data";
             return false;
         }
-        
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] ==== FAST CROP-ROTATE-FILL START ====";
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Input frame: " << input.width << "x" << input.height << " (横屏帧含黑边)";
         
         int inputWidth = input.width;   // 1920
         int inputHeight = input.height; // 1080
         
-        // 90度旋转应该宽高互换：1920x1080 -> 1080x1920
-        // 但为了保持和客户端的兼容性，我们需要返回横屏格式
-        // 所以先做真正的旋转，然后再缩放回横屏尺寸
+        // 【方案变更】真正的90度旋转：从1920x1080提取1080x1080正方形，旋转90度后输出1080x1080
+        // 这样避免了双重处理（旋转+缩放）导致的画面变形和残影问题
         
-        // Step 1: 先做真正的90度旋转 (宽高互换)
-        YUVFrame rotatedFrame;
-        if (!rotateYUV90Clockwise(input, rotatedFrame)) {
-            BOOST_LOG(error) << "[CROP-ROTATE-FAST] Failed to rotate frame";
+        BOOST_LOG(warning) << "[REAL-ROTATE] 方案说明：从横屏1920x1080中提取中间1080x1080正方形区域";
+        BOOST_LOG(warning) << "[REAL-ROTATE] 然后对这个正方形进行90度旋转，直接输出1080x1080";
+        BOOST_LOG(warning) << "[REAL-ROTATE] 避免旋转后再缩放的双重处理，消除残影和变形问题";
+        
+        // Step 1: 从横屏1920x1080中提取中间1080x1080正方形区域
+        int squareSize = inputHeight; // 1080
+        int cropX = (inputWidth - squareSize) / 2; // (1920-1080)/2 = 420
+        int cropY = 0; // 垂直不需要裁剪
+        
+        BOOST_LOG(info) << "[REAL-ROTATE] Step 1: 提取正方形区域 " << squareSize << "x" << squareSize;
+        BOOST_LOG(info) << "[REAL-ROTATE] 裁剪偏移: (" << cropX << ", " << cropY << ")";
+        
+        // 创建临时的正方形帧
+        YUVFrame squareFrame;
+        squareFrame.width = squareSize;
+        squareFrame.height = squareSize;
+        squareFrame.yStride = squareSize;
+        squareFrame.uvStride = squareSize / 2;
+        
+        squareFrame.yData.resize(squareSize * squareSize);
+        squareFrame.uData.resize((squareSize * squareSize) / 4);
+        squareFrame.vData.resize((squareSize * squareSize) / 4);
+        
+        // 提取Y分量的正方形区域
+        for (int y = 0; y < squareSize; y++) {
+            for (int x = 0; x < squareSize; x++) {
+                int srcIndex = (y + cropY) * inputWidth + (x + cropX);
+                int dstIndex = y * squareSize + x;
+                
+                if (srcIndex >= 0 && srcIndex < input.yData.size() && 
+                    dstIndex >= 0 && dstIndex < squareFrame.yData.size()) {
+                    squareFrame.yData[dstIndex] = input.yData[srcIndex];
+                }
+            }
+        }
+        
+        // 提取UV分量的正方形区域
+        int uvSquareSize = squareSize / 2;
+        int uvCropX = cropX / 2;
+        int uvCropY = cropY / 2;
+        int uvInputWidth = inputWidth / 2;
+        
+        for (int y = 0; y < uvSquareSize; y++) {
+            for (int x = 0; x < uvSquareSize; x++) {
+                int srcIndex = (y + uvCropY) * uvInputWidth + (x + uvCropX);
+                int dstIndex = y * uvSquareSize + x;
+                
+                if (srcIndex >= 0 && srcIndex < input.uData.size() && 
+                    dstIndex >= 0 && dstIndex < squareFrame.uData.size() &&
+                    srcIndex < input.vData.size() && 
+                    dstIndex < squareFrame.vData.size()) {
+                    squareFrame.uData[dstIndex] = input.uData[srcIndex];
+                    squareFrame.vData[dstIndex] = input.vData[srcIndex];
+                }
+            }
+        }
+        
+        BOOST_LOG(info) << "[REAL-ROTATE] Step 1 完成: 提取了 " << squareSize << "x" << squareSize << " 正方形区域";
+        
+        // Step 2: 对正方形区域进行90度旋转
+        BOOST_LOG(info) << "[REAL-ROTATE] Step 2: 对正方形区域进行90度旋转...";
+        
+        if (!rotateYUV90Clockwise(squareFrame, output)) {
+            BOOST_LOG(error) << "[REAL-ROTATE] Failed to rotate square frame";
             return false;
         }
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Step 1: Rotated " << input.width << "x" << input.height 
-                       << " -> " << rotatedFrame.width << "x" << rotatedFrame.height;
+        BOOST_LOG(info) << "[REAL-ROTATE] Step 2 完成: 旋转后尺寸 " << output.width << "x" << output.height;
         
-        // Step 2: 将旋转后的竖屏内容缩放回横屏尺寸
-        output.width = inputWidth;   // 保持原始横屏宽度
-        output.height = inputHeight; // 保持原始横屏高度
-        output.yStride = inputWidth;
-        output.uvStride = inputWidth / 2;
-        
-        // 分配并初始化输出内存
-        output.yData.resize(inputWidth * inputHeight);
-        output.uData.resize((inputWidth * inputHeight) / 4);
-        output.vData.resize((inputWidth * inputHeight) / 4);
-        
-        // 使用正确的视频黑色值
-        std::fill(output.yData.begin(), output.yData.end(), 16);   // 视频黑色
-        std::fill(output.uData.begin(), output.uData.end(), 128);  // 中性色度
-        std::fill(output.vData.begin(), output.vData.end(), 128);  // 中性色度
-        
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Step 2: Scaling rotated frame to fit original size...";
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Rotated size: " << rotatedFrame.width << "x" << rotatedFrame.height;
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Target size: " << output.width << "x" << output.height;
-        
-        // 【修复缩放逻辑】使用更大的缩放系数填满全屏
-        float scaleX = (float)output.width / rotatedFrame.width;   // 1920/1080 = 1.777
-        float scaleY = (float)output.height / rotatedFrame.height; // 1080/1920 = 0.5625
-        
-        // 【关键修复】使用更大的缩放系数以填满整个屏幕，而不是保持宽高比
-        float scale = std::max(scaleX, scaleY); // 使用较大的缩放系数填满屏幕
-        
-        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] === 填满全屏缩放策略 ===";
-        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] ScaleX: " << scaleX << ", ScaleY: " << scaleY;
-        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] Using MAX scale: " << scale << " (not min to fill screen)";
-        BOOST_LOG(warning) << "[CROP-ROTATE-SCALE] This will fill the entire screen, cropping excess content";
-        
-        int scaledWidth = (int)(rotatedFrame.width * scale);
-        int scaledHeight = (int)(rotatedFrame.height * scale);
-        int offsetX = (output.width - scaledWidth) / 2;
-        int offsetY = (output.height - scaledHeight) / 2;
-        
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scale factor: " << scale << " (FILL SCREEN MODE)";
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Scaled size: " << scaledWidth << "x" << scaledHeight;
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Offset: (" << offsetX << ", " << offsetY << ")";
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Note: Using fill-screen scaling, content may be cropped";
-        
-        // 【改进缩放算法】正确处理溢出边界的情况
-        for (int dstY = 0; dstY < output.height; dstY++) {
-            for (int dstX = 0; dstX < output.width; dstX++) {
-                // 计算在旋转后帧中的对应位置
-                float srcXf = (dstX - offsetX) / scale;
-                float srcYf = (dstY - offsetY) / scale;
-                int srcX = (int)srcXf;
-                int srcY = (int)srcYf;
-                
-                // 更严格的边界检查，避免负数索引
-                if (srcX >= 0 && srcX < rotatedFrame.width && 
-                    srcY >= 0 && srcY < rotatedFrame.height) {
-                    int srcIndex = srcY * rotatedFrame.width + srcX;
-                    int dstIndex = dstY * output.width + dstX;
-                    
-                    if (srcIndex >= 0 && srcIndex < rotatedFrame.yData.size() && 
-                        dstIndex >= 0 && dstIndex < output.yData.size()) {
-                        output.yData[dstIndex] = rotatedFrame.yData[srcIndex];
-                    }
-                }
-                // 如果超出边界，保持默认的黑色值（已初始化为16）
-            }
-        }
-        
-        // 【改进UV分量缩放】使用相同的填满全屏策略
-        int uvOutputWidth = output.width / 2;
-        int uvOutputHeight = output.height / 2;
-        int uvRotatedWidth = rotatedFrame.width / 2;
-        int uvRotatedHeight = rotatedFrame.height / 2;
-        
-        BOOST_LOG(info) << "[CROP-ROTATE-UV] Processing UV components with fill-screen strategy...";
-        BOOST_LOG(info) << "[CROP-ROTATE-UV] UV Output: " << uvOutputWidth << "x" << uvOutputHeight;
-        BOOST_LOG(info) << "[CROP-ROTATE-UV] UV Rotated: " << uvRotatedWidth << "x" << uvRotatedHeight;
-        
-        for (int dstY = 0; dstY < uvOutputHeight; dstY++) {
-            for (int dstX = 0; dstX < uvOutputWidth; dstX++) {
-                // 直接使用相同的缩放系数和偏移，但需要针对UV分辨率调整
-                float srcXf = (dstX * 2 - offsetX) / scale / 2;
-                float srcYf = (dstY * 2 - offsetY) / scale / 2;
-                int srcX = (int)srcXf;
-                int srcY = (int)srcYf;
-                
-                if (srcX >= 0 && srcX < uvRotatedWidth && 
-                    srcY >= 0 && srcY < uvRotatedHeight) {
-                    int srcIndex = srcY * uvRotatedWidth + srcX;
-                    int dstIndex = dstY * uvOutputWidth + dstX;
-                    
-                    if (srcIndex >= 0 && srcIndex < rotatedFrame.uData.size() && 
-                        dstIndex >= 0 && dstIndex < output.uData.size() &&
-                        srcIndex < rotatedFrame.vData.size() && 
-                        dstIndex < output.vData.size()) {
-                        output.uData[dstIndex] = rotatedFrame.uData[srcIndex];
-                        output.vData[dstIndex] = rotatedFrame.vData[srcIndex];
-                    }
-                }
-                // 如果超出边界，保持默认的中性色度值（已初始化为128）
-            }
-        }
-        
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] Rotation completed - " << input.width << "x" << input.height 
-                       << " -> " << output.width << "x" << output.height;
-        
-        // 验证YUV数据质量
+        // 验证输出质量
         validateAndFixYUVData(output);
         
-        BOOST_LOG(info) << "[CROP-ROTATE-FAST] ==== FAST CROP-ROTATE-FILL SUCCESS ====";
+        BOOST_LOG(info) << "[REAL-ROTATE] ==== TRUE ROTATION SUCCESS ====";
+        BOOST_LOG(info) << "[REAL-ROTATE] 最终输出: " << output.width << "x" << output.height;
+        BOOST_LOG(info) << "[REAL-ROTATE] 方案优势: 无双重处理，无残影，无画面变形";
+        
         return true;
     }
     
