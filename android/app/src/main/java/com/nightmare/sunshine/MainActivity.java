@@ -3,6 +3,7 @@ package com.nightmare.sunshine;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -11,6 +12,8 @@ import android.widget.Toast;
 import android.view.SurfaceView;
 
 import androidx.annotation.NonNull;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.plugin.common.MethodCall;
@@ -19,6 +22,7 @@ import io.flutter.plugin.common.MethodChannel;
 
 public class MainActivity extends FlutterActivity {
     private static final int REQUEST_CODE = 1000;
+    private static final int REQUEST_AUDIO_PERMISSION = 1001;
     private MediaProjectionManager mediaProjectionManager;
     public static Context context;
     // 录屏权限请求中标记：防止连点重复弹权限框
@@ -48,7 +52,19 @@ public class MainActivity extends FlutterActivity {
                             break;
                         }
                         isRequestingProjection = true;
-                        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
+                        // RECORD_AUDIO is a dangerous permission: it must be
+                        // granted at runtime or AudioPlaybackCapture is rejected
+                        // by the audio policy and the stream ends up silent.
+                        if (ContextCompat.checkSelfPermission(MainActivity.this,
+                                android.Manifest.permission.RECORD_AUDIO)
+                                != PackageManager.PERMISSION_GRANTED) {
+                            ActivityCompat.requestPermissions(MainActivity.this,
+                                    new String[]{android.Manifest.permission.RECORD_AUDIO},
+                                    REQUEST_AUDIO_PERMISSION);
+                            result.success("requesting");
+                            break;
+                        }
+                        requestScreenCapture();
                         result.success(null);
                         break;
                     case "pin":
@@ -71,6 +87,33 @@ public class MainActivity extends FlutterActivity {
                 }
             }
         });
+    }
+
+    /** 拉起系统录屏授权框。 */
+    private void requestScreenCapture() {
+        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_AUDIO_PERMISSION) {
+            return;
+        }
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (granted) {
+            Log.i("SunshineMain", "RECORD_AUDIO granted");
+        } else {
+            // Video still works without audio, so keep going and tell the user.
+            Log.w("SunshineMain", "RECORD_AUDIO denied, streaming will be silent");
+            Toast.makeText(MainActivity.this,
+                    "\u672a\u6388\u4e88\u5f55\u97f3\u6743\u9650\uff0c\u5c06\u4ee5\u65e0\u58f0\u97f3\u65b9\u5f0f\u4e32\u6d41",
+                    Toast.LENGTH_LONG).show();
+        }
+        // Continue the start flow: the screen capture dialog is next.
+        requestScreenCapture();
     }
 
     @Override
