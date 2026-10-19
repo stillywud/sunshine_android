@@ -38,6 +38,7 @@ namespace gl_render {
         int dst_width = 0;
         int dst_height = 0;
         int rotation_degrees = 0;
+        int draw_count = 0;
 
         bool valid = false;
     };

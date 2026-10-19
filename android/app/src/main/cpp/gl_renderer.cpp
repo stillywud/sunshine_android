@@ -193,6 +193,14 @@ namespace gl_render {
             return r;
         }
 
+        // EGL_RECORDABLE_ANDROID is mandatory when the EGL surface is the input
+        // of a hardware MediaCodec encoder. Software encoders (what an emulator
+        // provides) ignore it, which is why this worked there but produced black
+        // frames on real hardware.
+        //
+        // Choose the config explicitly instead of trusting eglChooseConfig's
+        // ordering: on some drivers the returned "best" config has
+        // EGL_RECORDABLE_ANDROID = 0 even though the attribute was requested.
         const EGLint config_attribs[] = {
                 EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
                 EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
@@ -200,14 +208,50 @@ namespace gl_render {
                 EGL_GREEN_SIZE, 8,
                 EGL_BLUE_SIZE, 8,
                 EGL_ALPHA_SIZE, 8,
+                EGL_RECORDABLE_ANDROID, 1,
                 EGL_NONE
         };
+
         EGLint num_configs = 0;
-        if (eglChooseConfig(r.display, config_attribs, &r.config, 1, &num_configs) != EGL_TRUE ||
-            num_configs < 1) {
-            GL_LOGE("eglChooseConfig failed: 0x%x", eglGetError());
-            destroy(r);
-            return r;
+        EGLConfig candidates[64];
+        if (eglChooseConfig(r.display, config_attribs, candidates, 64, &num_configs) != EGL_TRUE) {
+            num_configs = 0;
+        }
+
+        int recordable_count = 0;
+        for (EGLint i = 0; i < num_configs; i++) {
+            EGLint recordable = 0;
+            if (eglGetConfigAttrib(r.display, candidates[i], EGL_RECORDABLE_ANDROID, &recordable) &&
+                recordable) {
+                r.config = candidates[i];
+                recordable_count++;
+                break;
+            }
+        }
+
+        if (r.config == nullptr) {
+            // No recordable config: fall back so software-encoder devices still
+            // render, and say so loudly because hardware encoders need it.
+            GL_LOGE("no EGL config with EGL_RECORDABLE_ANDROID (checked %d), "
+                    "hardware encoders may output black frames", (int) num_configs);
+            const EGLint fallback_attribs[] = {
+                    EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+                    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                    EGL_RED_SIZE, 8,
+                    EGL_GREEN_SIZE, 8,
+                    EGL_BLUE_SIZE, 8,
+                    EGL_ALPHA_SIZE, 8,
+                    EGL_NONE
+            };
+            if (eglChooseConfig(r.display, fallback_attribs, &r.config, 1, &num_configs) != EGL_TRUE ||
+                num_configs < 1) {
+                GL_LOGE("eglChooseConfig failed: 0x%x", eglGetError());
+                destroy(r);
+                return r;
+            }
+        } else {
+            GL_LOG("picked recordable EGL config (%d of %d candidates)",
+                   recordable_count, (int) num_configs);
         }
 
         const EGLint context_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
@@ -267,34 +311,14 @@ namespace gl_render {
         }
 
         r.valid = true;
-        GL_LOG("renderer ready: src=%dx%d dst=%dx%d rotation=%d",
-               src_width, src_height, dst_width, dst_height, r.rotation_degrees);
+        {
+            EGLint recordable = 0;
+            eglGetConfigAttrib(r.display, r.config, EGL_RECORDABLE_ANDROID, &recordable);
+            GL_LOG("renderer ready: src=%dx%d dst=%dx%d rotation=%d recordable=%d",
+                   src_width, src_height, dst_width, dst_height, r.rotation_degrees,
+                   (int) recordable);
+        }
         return r;
-    }
-
-    bool set_texture(renderer_t &r, GLuint texture_name) {
-        if (!r.valid || texture_name == 0) {
-            return false;
-        }
-        if (!make_current(r)) {
-            return false;
-        }
-        // The SurfaceTexture calls glBindTexture on this name, so it must be
-        // bound with the external OES target first.
-        r.texture = texture_name;
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, r.texture);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
-
-        GLenum gl_error = glGetError();
-        if (gl_error != GL_NO_ERROR) {
-            GL_LOGE("GL error binding capture texture: 0x%x", gl_error);
-            return false;
-        }
-        return true;
     }
 
     void draw(renderer_t &r, const float tex_matrix[16]) {
@@ -339,6 +363,17 @@ namespace gl_render {
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        GLenum draw_error = glGetError();
+        if (draw_error != GL_NO_ERROR && r.draw_count < 3) {
+            GL_LOGE("GL error after draw #%d: 0x%x", (int) r.draw_count, draw_error);
+        }
+        if (r.draw_count < 3) {
+            GL_LOG("draw #%d: tex=%u quad=(%.3f,%.3f) rot=%d",
+                   (int) r.draw_count, (unsigned) r.texture, scale_x, scale_y,
+                   r.rotation_degrees);
+        }
+        r.draw_count++;
 
         if (eglSwapBuffers(r.display, r.surface) != EGL_TRUE) {
             GL_LOGE("eglSwapBuffers failed: 0x%x", eglGetError());

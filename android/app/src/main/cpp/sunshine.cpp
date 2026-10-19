@@ -934,6 +934,15 @@ std::vector<uint8_t> codecConfigData;
                                 bool isKeyFrame =
                                         (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
                                 frameIndex++;
+                                if (frameIndex <= 3 || frameIndex % 120 == 0) {
+                                    __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                                        "encoded frame #%lld size=%d key=%d "
+                                                        "flags=0x%x",
+                                                        (long long) frameIndex,
+                                                        (int) bufferInfo.size,
+                                                        isKeyFrame ? 1 : 0,
+                                                        bufferInfo.flags);
+                                }
                                 std::vector<uint8_t> frameData;
                                 if (isKeyFrame && !codecConfigData.empty()) {
                                     frameData.reserve(codecConfigData.size() + bufferInfo.size);
