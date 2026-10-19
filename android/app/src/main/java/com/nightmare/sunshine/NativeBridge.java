@@ -67,7 +67,7 @@ public class NativeBridge {
 
     /**
      * 设置画面旋转模式（存 SharedPreferences，跨进程共享）
-     * 0=自动，1=左转90°，2=180°，3=右转90°
+     * 0=默认（不旋转），1=左转90°，2=180°，3=右转90°
      */
     public static void setRotationMode(int mode) {
         if (context != null) {
@@ -121,7 +121,7 @@ public class NativeBridge {
 
     /**
      * 屏幕内容相对自然方向的旋转角（0/90/180/270），顺时针。
-     * 用于「自动」模式判断源画面是否需要转 90°。
+     * 目前仅用于日志诊断，旋转模式由用户显式选择。
      */
     public static int getDisplayRotation() {
         if (context != null) {

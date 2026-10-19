@@ -44,7 +44,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _elapsedTime = 0;
   // 当前状态：0-停止，1-运行，2-暂停
   int _state = 0;
-  // 画面旋转模式：0=自动，1=左转90°，2=180°，3=右转90°
+  // 画面旋转模式：0=默认（不旋转），1=左转90°，2=180°，3=右转90°
   int _rotationMode = 0;
 
   // 格式化时间显示
@@ -202,7 +202,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
                 Expanded(
                   child: SegmentedButton<int>(
                     segments: const [
-                      ButtonSegment(value: 0, label: Text('自动')),
+                      ButtonSegment(value: 0, label: Text('默认')),
                       ButtonSegment(value: 1, label: Text('左转90°')),
                       ButtonSegment(value: 2, label: Text('180°')),
                       ButtonSegment(value: 3, label: Text('右转90°')),

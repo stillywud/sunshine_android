@@ -723,13 +723,15 @@ namespace sunshine_callbacks {
 
         const int mode = query_rotation_mode(env);
 
-        // mode: 0=auto, 1=left 90, 2=180, 3=right 90
+        // mode: 0=default (no rotation), 1=left 90, 2=180, 3=right 90
         // rotation_degrees is applied to the sampled texture, and the observed
         // mapping on device is: 90 -> image turns clockwise, 270 -> counter-clockwise.
         // "向左旋转 90°" means the picture turns counter-clockwise.
+        //
+        // Mode 0 keeps the capture untouched: a portrait source is fitted into
+        // the landscape encoder frame with black bars on both sides, matching
+        // the original behaviour before rotation support existed.
         int rotation_degrees = 0;
-        bool source_is_portrait = screen.height > screen.width;
-        bool target_is_landscape = config.width >= config.height;
         switch (mode) {
             case 1:
                 rotation_degrees = 270; // 左转 90°
@@ -741,10 +743,7 @@ namespace sunshine_callbacks {
                 rotation_degrees = 90; // 右转 90°
                 break;
             default:
-                // 自动：竖屏源投到横屏目标时左转 90°，填满客户端屏幕
-                if (source_is_portrait && target_is_landscape) {
-                    rotation_degrees = 270;
-                }
+                rotation_degrees = 0; // 默认：不旋转
                 break;
         }
 
