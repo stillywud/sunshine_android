@@ -7,6 +7,7 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.Toast;
 import android.view.SurfaceView;
 
 import androidx.annotation.NonNull;
@@ -20,6 +21,8 @@ public class MainActivity extends FlutterActivity {
     private static final int REQUEST_CODE = 1000;
     private MediaProjectionManager mediaProjectionManager;
     public static Context context;
+    // 录屏权限请求中标记：防止连点重复弹权限框
+    private static boolean isRequestingProjection = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -33,6 +36,18 @@ public class MainActivity extends FlutterActivity {
             public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
                 switch (call.method) {
                     case "start":
+                        // 若服务已在运行：先停服再走启动流程，保证重连时是干净状态
+                        if (ScreenCaptureService.isRunning) {
+                            Log.i("SunshineMain", "start: service running, stopping first for clean restart");
+                            try { stopService(new Intent(MainActivity.this, ScreenCaptureService.class)); } catch (Exception e) { }
+                            try { Thread.sleep(1000); } catch (InterruptedException ie) { }
+                        }
+                        if (isRequestingProjection) {
+                            Toast.makeText(MainActivity.this, "\u6b63\u5728\u8bf7\u6c42\u5f55\u5c4f\u6743\u9650\u2026", Toast.LENGTH_SHORT).show();
+                            result.success("requesting");
+                            break;
+                        }
+                        isRequestingProjection = true;
                         startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
                         result.success(null);
                         break;
@@ -40,6 +55,14 @@ public class MainActivity extends FlutterActivity {
                         String pin = (String) call.arguments;
                         NativeBridge.submitPin(pin);
                         result.success(pin);
+                        break;
+                    case "rotationMode":
+                        int mode = (int) call.arguments;
+                        NativeBridge.setRotationMode(mode);
+                        result.success(mode);
+                        break;
+                    case "getRotationMode":
+                        result.success(NativeBridge.getRotationMode());
                         break;
                     case "address":
                         String address = MDNSHelper.getWifiIpAddress(getContext());
@@ -53,8 +76,16 @@ public class MainActivity extends FlutterActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_CODE) {
+            isRequestingProjection = false;
+        }
         if (requestCode == REQUEST_CODE && resultCode == Activity.RESULT_OK) {
             Log.d("MainActivity", "onActivityResult: " + data);
+            if (data == null) {
+                // 录屏授权返回的 Intent 为空（"不再显示"自动授权场景），无法创建 MediaProjection
+                Toast.makeText(MainActivity.this, "\u5f55\u5c4f\u6743\u9650\u83b7\u53d6\u5931\u8d25\uff0c\u8bf7\u91cd\u8bd5", Toast.LENGTH_LONG).show();
+                return;
+            }
             Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
             serviceIntent.putExtra("resultCode", resultCode);
             serviceIntent.putExtra("data", data);

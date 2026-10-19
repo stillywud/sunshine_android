@@ -18,10 +18,18 @@ import javax.jmdns.ServiceInfo;
 
 public class MDNSHelper {
     private static final String TAG = "MDNSHelper";
+    private static volatile Thread broadcastThread = null;
+    private static volatile JmDNS jmdnsInstance = null;
 
-    public static void broadcastService(Context context) {
-        new Thread(() -> {
-            try (JmDNS jmdns = JmDNS.create(Inet4Address.getByName(getWifiIpAddress(context)))) {
+    /** 启动 mDNS 广播（幂等：已在广播则直接返回） */
+    public static synchronized void broadcastService(Context context) {
+        if (broadcastThread != null && broadcastThread.isAlive()) {
+            Log.i(TAG, "mDNS already broadcasting, skip");
+            return;
+        }
+        broadcastThread = new Thread(() -> {
+            try {
+                jmdnsInstance = JmDNS.create(Inet4Address.getByName(getWifiIpAddress(context)));
                 ServiceInfo serviceInfo = ServiceInfo.create(
                         "_nvstream._tcp.local.",
                         "Sunshine",
@@ -29,7 +37,7 @@ public class MDNSHelper {
                         "Sunshine"
                 );
 
-                jmdns.registerService(serviceInfo);
+                jmdnsInstance.registerService(serviceInfo);
                 Log.i(TAG, "JmDNS service registered successfully");
 
                 // Keep the thread alive to maintain the broadcast
@@ -40,8 +48,25 @@ public class MDNSHelper {
                 }
             } catch (IOException e) {
                 Log.e(TAG, "Error broadcasting service", e);
+            } finally {
+                if (jmdnsInstance != null) {
+                    try { jmdnsInstance.unregisterAllServices(); } catch (Exception ignored) {}
+                    try { jmdnsInstance.close(); } catch (Exception ignored) {}
+                    jmdnsInstance = null;
+                }
             }
-        }).start();
+        }, "SunshineMDNS");
+        broadcastThread.setDaemon(true);
+        broadcastThread.start();
+    }
+
+    /** 停止 mDNS 广播 */
+    public static synchronized void stopBroadcast() {
+        if (broadcastThread != null && broadcastThread.isAlive()) {
+            broadcastThread.interrupt();
+            Log.i(TAG, "mDNS broadcast stop requested");
+        }
+        broadcastThread = null;
     }
 
     public static String getWifiIpAddress(Context context) {

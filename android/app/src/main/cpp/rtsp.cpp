@@ -15,6 +15,7 @@ extern "C" {
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -549,18 +550,29 @@ namespace rtsp_stream {
         }
       }
 
-      auto lg = _session_slots.lock();
+      // Collect the slots to retire while holding the lock, then drop the lock
+      // before joining. join() blocks until the session's threads exit, and
+      // holding _session_slots across it deadlocks every other caller
+      // (session_count() from the HTTPS /launch handler, the RTSP accept loop).
+      std::vector<std::shared_ptr<stream::session_t>> retiring;
+      {
+        auto lg = _session_slots.lock();
 
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *i;
+          if (all || stream::session::state(*slot) == stream::session::state_e::STOPPING) {
+            stream::session::stop(*slot);
+            retiring.push_back(slot);
+            i = _session_slots->erase(i);
+          } else {
+            i++;
+          }
         }
+      }
+
+      // Join outside the lock. The shared_ptr keeps each slot alive meanwhile.
+      for (auto &slot: retiring) {
+        stream::session::join(*slot);
       }
     }
 
@@ -1092,6 +1104,10 @@ namespace rtsp_stream {
   void rtpThread() {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+
+    // Keep the UDP listeners alive across sessions so reconnects do not race
+    // with port rebinding.
+    stream::pin_broadcast();
 
     server.map("OPTIONS"sv, &cmd_option);
     server.map("DESCRIBE"sv, &cmd_describe);

@@ -458,6 +458,27 @@ namespace stream {
 
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
 
+  /**
+   * @brief Pin the broadcast context for the lifetime of the process.
+   *
+   * The UDP control/video/audio listeners are torn down when the last
+   * broadcast reference drops. That happens as soon as a session ends, so a
+   * reconnect would have to rebind every port while the previous sockets are
+   * still closing, and clients time out on the control handshake.
+   *
+   * Holding one reference here keeps the listeners alive across sessions.
+   */
+  decltype(broadcast)::ptr_t &pinned_broadcast_ref() {
+    static auto pinned = broadcast.ref();
+    return pinned;
+  }
+
+  /** Drop the pinned reference so a fresh server start can rebind cleanly. */
+  void unpin_broadcast() {
+    auto &pinned = pinned_broadcast_ref();
+    pinned = decltype(broadcast)::ptr_t {};
+  }
+
   session_t *control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
     {
       // Fast path - look up existing session by peer
@@ -496,7 +517,9 @@ namespace stream {
       }
 
       // Once the control stream connection is established, RTSP session state can be torn down
-//      rtsp_stream::launch_session_clear(session_p->launch_session_id);
+      // Without this, the stale launch event keeps session_raise() from accepting the
+      // next /launch, which makes every reconnect fail at the RTSP handshake.
+      rtsp_stream::launch_session_clear(session_p->launch_session_id);
 
       session_p->control.peer = peer;
 
@@ -1837,6 +1860,10 @@ namespace stream {
             currentSessionVideoQueue->raise(std::move(packet));
         }
     }
+
+  void pin_broadcast() {
+    pinned_broadcast_ref();
+  }
 
   void audioThread(session_t *session) {
 //    auto fg = util::fail_guard([&]() {

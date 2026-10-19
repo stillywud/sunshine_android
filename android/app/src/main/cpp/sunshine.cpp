@@ -15,7 +15,18 @@
 #include <media/NdkMediaFormat.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <android/log.h>
+#include <dlfcn.h>
 #include <boost/endian/buffers.hpp>
+
+#include <chrono>
+#include <condition_variable>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "gl_renderer.h"
 
 using namespace std::literals;
 
@@ -29,6 +40,35 @@ static audio::sample_queue_t samples = nullptr;
 
 // 声明全局变量来存储音频录制状态
 static std::thread audioRecordingThread;
+
+// 采集帧到达通知：SurfaceTexture 回调 raise，渲染循环 consume。
+// 用计数信号量而非布尔标志：回调可能连续触发多次，布尔标志会丢失通知。
+static std::mutex g_frame_mutex;
+static std::condition_variable g_frame_cv;
+static int g_frame_pending = 0;
+
+static void signal_capture_frame() {
+    {
+        std::lock_guard<std::mutex> lock(g_frame_mutex);
+        if (g_frame_pending < 4) {
+            g_frame_pending++;
+        }
+    }
+    g_frame_cv.notify_one();
+}
+
+/**
+ * 等待下一帧，最多 @p timeout。
+ * @return true 表示有新帧可 update，false 表示超时（调用方应检查 shutdown）。
+ */
+static bool wait_capture_frame(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(g_frame_mutex);
+    if (g_frame_cv.wait_for(lock, timeout, [] { return g_frame_pending > 0; })) {
+        g_frame_pending--;
+        return true;
+    }
+    return false;
+}
 
 /// Create a Java Integer object
 jobject createJavaInt(JNIEnv *env, int value) {
@@ -47,17 +87,26 @@ void invokeJavaFunction(
         BOOST_LOG(error) << "JVM is null!"sv;
         return;
     }
-    JNIEnv *env;
-    jint result = jvm->AttachCurrentThread(&env, nullptr);
-    if (result != JNI_OK) {
-        BOOST_LOG(error) << "Cannot attach java thread!"sv;
-        return;
+
+    // Do not blindly Attach/Detach: the calling thread is often already
+    // attached (and on Adreno under ARM translation, detaching it breaks all
+    // later JNI calls from that thread). Only attach when we actually own it.
+    JNIEnv *env = nullptr;
+    bool attached_here = false;
+    if (jvm->GetEnv((void **) &env, JNI_VERSION_1_6) != JNI_OK) {
+        if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            BOOST_LOG(error) << "Cannot attach java thread!"sv;
+            return;
+        }
+        attached_here = true;
     }
 
     jmethodID method = env->GetStaticMethodID(sunshineServerClass, name, sig);
     if (method == nullptr) {
         BOOST_LOG(error) << "Cannot find method "sv << name << " with signature "sv << sig;
-        jvm->DetachCurrentThread();
+        if (attached_here) {
+            jvm->DetachCurrentThread();
+        }
         return;
     }
     va_list args;
@@ -67,7 +116,10 @@ void invokeJavaFunction(
         env->ExceptionDescribe();
         env->ExceptionClear();
     }
-    jvm->DetachCurrentThread();
+    va_end(args);
+    if (attached_here) {
+        jvm->DetachCurrentThread();
+    }
 }
 /// Create a Java Double object
 jobject createJavaDouble(JNIEnv *env, double value) {
@@ -126,12 +178,23 @@ jobject convertMapToJavaHashMap(JNIEnv *env, const std::map<std::string, std::an
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
+    static std::atomic<bool> server_running {false};
+    if (server_running.exchange(true)) {
+        // The native server owns process-global state (mail bus, UDP broadcast
+        // listeners, task pool). Starting it twice would duplicate all of that,
+        // so a second Start from the UI is a no-op until the process restarts.
+        __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                            "native server already running, ignoring duplicate start");
+        return;
+    }
+
     env->GetJavaVM(&jvm);
     g_env = env;
     // Use the passed clazz parameter directly instead of looking up the class by name
     sunshineServerClass = (jclass) env->NewGlobalRef(clazz);
     if (sunshineServerClass == nullptr) {
         BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
+        server_running.store(false);
         return;
     }
     deinit = logging::init(1, "/dev/null");
@@ -180,6 +243,32 @@ Java_com_nightmare_sunshine_NativeBridge_submitPin(JNIEnv *env, jclass clazz, js
     const char *pinStr = env->GetStringUTFChars(pin, nullptr);
     nvhttp::pin(pinStr, "some-moonlight");
     env->ReleaseStringUTFChars(pin, pinStr);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_onCaptureFrameAvailable(JNIEnv *env, jclass clazz) {
+    signal_capture_frame();
+}
+
+/**
+ * Stop the native server. ScreenCaptureService.onDestroy() calls this, so the
+ * symbol must exist even when the server thread is not running.
+ *
+ * The broadcast listeners are pinned for the process lifetime so reconnects do
+ * not race with port rebinding; releasing the pin here lets them shut down
+ * before the next start binds the same ports again.
+ */
+JNIEXPORT void JNICALL
+Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
+    // The native server owns process-global state (mail bus, UDP broadcast
+    // listeners, task pool) that cannot be rebuilt safely inside the same
+    // process, so this never tears the server down. Its only job is to exist:
+    // ScreenCaptureService.onDestroy() calls it, and the JVM would abort with
+    // UnsatisfiedLinkError if the symbol were missing.
+    //
+    // Sessions are still ended the normal way: when the client disconnects the
+    // ENet disconnect handler stops the session, and the RTSP/HTTP listeners
+    // keep running so the next Start serves new clients.
 }
 
 JNIEXPORT void JNICALL
@@ -410,14 +499,107 @@ namespace sunshine_callbacks {
         invokeJavaFunction("stopVirtualDisplay", "()V");
     }
 
+    /** 读取屏幕逻辑尺寸与当前显示旋转角（供旋转管线决定源分辨率）。 */
+    struct screen_info_t {
+        int width = 0;
+        int height = 0;
+        int rotation = 0;
+    };
+
+    screen_info_t query_screen_info(JNIEnv *env) {
+        screen_info_t info;
+        jmethodID w = env->GetStaticMethodID(sunshineServerClass, "getScreenWidth", "()I");
+        jmethodID h = env->GetStaticMethodID(sunshineServerClass, "getScreenHeight", "()I");
+        jmethodID r = env->GetStaticMethodID(sunshineServerClass, "getDisplayRotation", "()I");
+        if (w && h && r) {
+            info.width = env->CallStaticIntMethod(sunshineServerClass, w);
+            info.height = env->CallStaticIntMethod(sunshineServerClass, h);
+            info.rotation = env->CallStaticIntMethod(sunshineServerClass, r);
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        return info;
+    }
+    /** 读取用户选择的画面旋转模式：0=自动 1=左转90° 2=180° 3=右转90° */
+    int query_rotation_mode(JNIEnv *env) {
+        jmethodID m = env->GetStaticMethodID(sunshineServerClass, "getRotationMode", "()I");
+        if (!m) {
+            return 0;
+        }
+        int mode = env->CallStaticIntMethod(sunshineServerClass, m);
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return 0;
+        }
+        return mode;
+    }
+
+    // ------------------------------------------------------------------
+    // ASurfaceTexture is API 28+, but minSdk is 26. Resolve it at runtime so
+    // the library still loads on older devices and the rotation path simply
+    // stays disabled there.
+    // ------------------------------------------------------------------
+    struct ASurfaceTexture;
+
+    typedef ASurfaceTexture *(*asurfacetexture_from_surfacetexture_fn)(JNIEnv *, jobject);
+    typedef int (*asurfacetexture_attach_fn)(ASurfaceTexture *, uint32_t);
+    typedef int (*asurfacetexture_detach_fn)(ASurfaceTexture *);
+    typedef int (*asurfacetexture_update_fn)(ASurfaceTexture *);
+    typedef void (*asurfacetexture_matrix_fn)(ASurfaceTexture *, float[16]);
+    typedef void (*asurfacetexture_release_fn)(ASurfaceTexture *);
+
+    struct surface_texture_api_t {
+        asurfacetexture_from_surfacetexture_fn from_surface_texture = nullptr;
+        asurfacetexture_attach_fn attach = nullptr;
+        asurfacetexture_detach_fn detach = nullptr;
+        asurfacetexture_update_fn update = nullptr;
+        asurfacetexture_matrix_fn matrix = nullptr;
+        asurfacetexture_release_fn release = nullptr;
+        bool available() const {
+            return from_surface_texture && attach && detach && update && matrix && release;
+        }
+    };
+
+    const surface_texture_api_t &surface_texture_api() {
+        static surface_texture_api_t api;
+        static bool loaded = false;
+        if (!loaded) {
+            loaded = true;
+            void *handle = dlopen("libandroid.so", RTLD_NOW);
+            if (handle) {
+                api.from_surface_texture = (asurfacetexture_from_surfacetexture_fn)
+                        dlsym(handle, "ASurfaceTexture_fromSurfaceTexture");
+                api.attach = (asurfacetexture_attach_fn)
+                        dlsym(handle, "ASurfaceTexture_attachToGLContext");
+                api.detach = (asurfacetexture_detach_fn)
+                        dlsym(handle, "ASurfaceTexture_detachFromGLContext");
+                api.update = (asurfacetexture_update_fn)
+                        dlsym(handle, "ASurfaceTexture_updateTexImage");
+                api.matrix = (asurfacetexture_matrix_fn)
+                        dlsym(handle, "ASurfaceTexture_getTransformMatrix");
+                api.release = (asurfacetexture_release_fn)
+                        dlsym(handle, "ASurfaceTexture_release");
+            }
+            __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                "ASurfaceTexture available=%d", api.available() ? 1 : 0);
+        }
+        return api;
+    }
+
 
     void captureVideoLoop(void *channel_data, safe::mail_t mail, const video::config_t &config,
                           const audio::config_t &audioConfig) {
-        JNIEnv *env;
-        jint result = jvm->AttachCurrentThread(&env, nullptr);
-        if (result != JNI_OK) {
-            BOOST_LOG(error) << "无法附加到 Java 线程"sv;
-            return;
+        JNIEnv *env = nullptr;
+        bool attached_here = false;
+        if (jvm->GetEnv((void **) &env, JNI_VERSION_1_6) != JNI_OK) {
+            if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+                BOOST_LOG(error) << "无法附加到 Java 线程"sv;
+                return;
+            }
+            attached_here = true;
         }
         auto shutdown_event = mail->event<bool>(mail::shutdown);
         auto idr_events = mail->event<bool>(mail::idr);
@@ -511,7 +693,7 @@ namespace sunshine_callbacks {
             ANativeWindow_release(inputSurface);
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
-            jvm->DetachCurrentThread();
+            if (attached_here) jvm->DetachCurrentThread();
             return;
         }
 
@@ -523,15 +705,308 @@ namespace sunshine_callbacks {
             BOOST_LOG(info) << "Audio config: Sound will be played on client (Moonlight)"sv;
         }
 
-        // Create virtual display with audio configuration
-        createVirtualDisplay(env, config.width, config.height, 120, audioConfig.packetDuration, javaSurface, shouldMute);
+        // ------------------------------------------------------------------
+        // Rotation pipeline
+        //
+        // MediaProjection mirrors the physical screen without letting us
+        // rotate it. Creating the VirtualDisplay at the *client's* resolution
+        // therefore letterboxes a portrait screen inside a landscape frame.
+        //
+        // Instead we capture at the source resolution into a SurfaceTexture,
+        // then draw it rotated into the encoder's input surface with EGL.
+        // ------------------------------------------------------------------
+        screen_info_t screen = query_screen_info(env);
+        if (screen.width <= 0 || screen.height <= 0) {
+            screen.width = config.width;
+            screen.height = config.height;
+        }
+
+        const int mode = query_rotation_mode(env);
+
+        // mode: 0=auto, 1=left 90, 2=180, 3=right 90
+        // rotation_degrees is applied to the sampled texture, and the observed
+        // mapping on device is: 90 -> image turns clockwise, 270 -> counter-clockwise.
+        // "向左旋转 90°" means the picture turns counter-clockwise.
+        int rotation_degrees = 0;
+        bool source_is_portrait = screen.height > screen.width;
+        bool target_is_landscape = config.width >= config.height;
+        switch (mode) {
+            case 1:
+                rotation_degrees = 270; // 左转 90°
+                break;
+            case 2:
+                rotation_degrees = 180;
+                break;
+            case 3:
+                rotation_degrees = 90; // 右转 90°
+                break;
+            default:
+                // 自动：竖屏源投到横屏目标时左转 90°，填满客户端屏幕
+                if (source_is_portrait && target_is_landscape) {
+                    rotation_degrees = 270;
+                }
+                break;
+        }
+
+        __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                            "screen=%dx%d displayRotation=%d mode=%d -> glRotation=%d "
+                            "encoder=%dx%d",
+                            screen.width, screen.height, screen.rotation, mode,
+                            rotation_degrees, config.width, config.height);
+
+        __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "creating GL renderer...");
+        gl_render::renderer_t renderer = gl_render::create(
+                inputSurface,
+                screen.width, screen.height,
+                config.width, config.height,
+                rotation_degrees);
+        __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "GL renderer created, valid=%d",
+                            renderer.valid ? 1 : 0);
+
+        // Note: eglMakeCurrent leaves the thread's JNI state intact as long as
+        // we never call DetachCurrentThread on a thread we did not attach.
+        // All JNI work below happens on this thread before gl_render::destroy().
+
+        if (!renderer.valid) {
+            BOOST_LOG(error) << "Failed to create GL renderer, falling back to direct surface"sv;
+            createVirtualDisplay(env, config.width, config.height, 120,
+                                 audioConfig.packetDuration, javaSurface, shouldMute);
+        } else {
+            // Create the capture SurfaceTexture from Java (so it has a valid
+            // Looper-free object) and wrap it with ASurfaceTexture, which lets
+            // us drive it purely from native without further JNI calls.
+            __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "creating capture surface...");
+            jmethodID createCapture = env->GetStaticMethodID(
+                    sunshineServerClass, "createCaptureSurface", "(II)[Ljava/lang/Object;");
+            jobjectArray capture = createCapture
+                                   ? (jobjectArray) env->CallStaticObjectMethod(
+                            sunshineServerClass, createCapture,
+                            (jint) screen.width, (jint) screen.height)
+                                   : nullptr;
+
+            jobject surfaceTexture = nullptr;
+            jobject captureSurface = nullptr;
+            jobject callbackThread = nullptr;
+            if (capture != nullptr) {
+                surfaceTexture = env->GetObjectArrayElement(capture, 0);
+                captureSurface = env->GetObjectArrayElement(capture, 1);
+                callbackThread = env->GetObjectArrayElement(capture, 2);
+            }
+
+            const surface_texture_api_t &stApi = surface_texture_api();
+            ASurfaceTexture *asSurfaceTexture =
+                    (surfaceTexture && stApi.available())
+                    ? stApi.from_surface_texture(env, surfaceTexture) : nullptr;
+
+            // Promote to global refs: the cleanup below runs after further JNI
+            // calls, and local refs can be invalidated by EGL/thread state.
+            jobject surfaceTextureGlobal =
+                    surfaceTexture ? env->NewGlobalRef(surfaceTexture) : nullptr;
+            jobject captureSurfaceGlobal =
+                    captureSurface ? env->NewGlobalRef(captureSurface) : nullptr;
+            jobject callbackThreadGlobal =
+                    callbackThread ? env->NewGlobalRef(callbackThread) : nullptr;
+
+            if (asSurfaceTexture == nullptr || captureSurface == nullptr) {
+                __android_log_print(ANDROID_LOG_ERROR, "SunshineRot",
+                                    "capture surface unavailable, using direct mirroring");
+                gl_render::destroy(renderer);
+                createVirtualDisplay(env, config.width, config.height, 120,
+                                     audioConfig.packetDuration, javaSurface, shouldMute);
+            } else {
+                // Bind the capture texture to this EGL context. The context is
+                // current on this thread, which is what attachToGLContext needs.
+                int attachResult = stApi.attach(asSurfaceTexture, renderer.texture);
+                __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                    "attachToGLContext result=%d tex=%u",
+                                    attachResult, (unsigned) renderer.texture);
+
+                // The VirtualDisplay mirrors the source screen at its native
+                // resolution into the SurfaceTexture, no letterboxing.
+                invokeJavaFunction("createVirtualDisplay",
+                                   "(IIIILandroid/view/Surface;Z)V",
+                                   screen.width, screen.height, 120,
+                                   audioConfig.packetDuration, captureSurfaceGlobal, shouldMute);
+
+                status = AMediaCodec_start(codec);
+                if (status != AMEDIA_OK) {
+                    BOOST_LOG(error) << "Failed to start encoder, error code: "sv << status;
+                    stApi.release(asSurfaceTexture);
+                    env->DeleteLocalRef(javaSurface);
+                    env->DeleteLocalRef(surfaceTexture);
+                    env->DeleteLocalRef(captureSurface);
+                    gl_render::destroy(renderer);
+                    if (attached_here) jvm->DetachCurrentThread();
+                    ANativeWindow_release(inputSurface);
+                    AMediaCodec_delete(codec);
+                    AMediaFormat_delete(format);
+                    return;
+                }
+
+std::vector<uint8_t> codecConfigData;
+                int64_t frameIndex = 0;
+                long long frame_count = 0;
+                bool first_frame_logged = false;
+                auto last_frame_time = std::chrono::steady_clock::now();
+
+                // Drop any frame notification left over from a previous session.
+                {
+                    std::lock_guard<std::mutex> lock(g_frame_mutex);
+                    g_frame_pending = 0;
+                }
+
+                // Watchdog: updateTexImage blocks until the producer delivers a
+                // frame. After a client disconnect the producer goes quiet, so a
+                // helper thread tears the VirtualDisplay down to unblock it and
+                // let the session be joined.
+                std::atomic<bool> capture_done {false};
+                std::thread watchdog([&]() {
+                    while (!capture_done.load(std::memory_order_relaxed)) {
+                        if (shutdown_event->peek()) {
+                            __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                                "shutdown while capturing, releasing VirtualDisplay");
+                            stopVirtualDisplay();
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                });
+
+                while (!shutdown_event->peek()) {
+                    bool requested_idr_frame = false;
+                    if (idr_events->peek()) {
+                        requested_idr_frame = true;
+                        idr_events->pop();
+                    }
+                    if (requested_idr_frame) {
+                        AMediaFormat *params = AMediaFormat_new();
+                        AMediaFormat_setInt32(params, "request-sync", 0);
+                        if (AMediaCodec_setParameters(codec, params) == AMEDIA_OK) {
+                            BOOST_LOG(info) << "IDR frame requested";
+                        }
+                        AMediaFormat_delete(params);
+                    }
+
+                    float tex_matrix[16] = {
+                            1, 0, 0, 0,
+                            0, 1, 0, 0,
+                            0, 0, 1, 0,
+                            0, 0, 0, 1
+                    };
+                    if (!first_frame_logged) {
+                        __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                            "first updateTexImage call");
+                        first_frame_logged = true;
+                    }
+                    int updateResult = stApi.update(asSurfaceTexture);
+                    if (updateResult == 0) {
+                        stApi.matrix(asSurfaceTexture, tex_matrix);
+                        frame_count++;
+                        if (frame_count % 60 == 1) {
+                            __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                                                "captured %lld frames", (long long) frame_count);
+                        }
+                    }
+
+                    gl_render::draw(renderer, tex_matrix);
+
+                    // Drain whatever the encoder produced; the GL swap above
+                    // supplies the frames.
+                    for (;;) {
+                        AMediaCodecBufferInfo bufferInfo;
+                        ssize_t outputBufferIndex =
+                                AMediaCodec_dequeueOutputBuffer(codec, &bufferInfo, 0);
+                        if (outputBufferIndex == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+                            break;
+                        }
+                        if (outputBufferIndex < 0) {
+                            break;
+                        }
+
+                        size_t out_size = 0;
+                        uint8_t *buffer =
+                                AMediaCodec_getOutputBuffer(codec, outputBufferIndex, &out_size);
+                        if (buffer != nullptr) {
+                            if (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) {
+                                codecConfigData.assign(buffer, buffer + bufferInfo.size);
+                                BOOST_LOG(info) << "Saved codec config, size: "sv
+                                                << codecConfigData.size();
+                            } else if (bufferInfo.size > 0) {
+                                bool isKeyFrame =
+                                        (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0;
+                                frameIndex++;
+                                std::vector<uint8_t> frameData;
+                                if (isKeyFrame && !codecConfigData.empty()) {
+                                    frameData.reserve(codecConfigData.size() + bufferInfo.size);
+                                    frameData.insert(frameData.end(), codecConfigData.begin(),
+                                                     codecConfigData.end());
+                                }
+                                frameData.insert(frameData.end(), buffer,
+                                                 buffer + bufferInfo.size);
+                                stream::postFrame(std::move(frameData), frameIndex, isKeyFrame,
+                                                  channel_data);
+                            }
+                        }
+                        AMediaCodec_releaseOutputBuffer(codec, outputBufferIndex, false);
+                    }
+
+                    // Pace the capture at the client frame rate.
+                    auto frame_duration = std::chrono::microseconds(
+                            1000000 / (config.framerate > 0 ? config.framerate : 60));
+                    last_frame_time += frame_duration;
+                    auto now = std::chrono::steady_clock::now();
+                    if (last_frame_time > now) {
+                        std::this_thread::sleep_until(last_frame_time);
+                    } else {
+                        last_frame_time = now;
+                    }
+                }
+
+                // Release capture resources. ASurfaceTexture_detachFromGLContext
+                // must run while our EGL context is still current.
+                capture_done.store(true, std::memory_order_relaxed);
+                if (watchdog.joinable()) {
+                    watchdog.join();
+                }
+                stApi.detach(asSurfaceTexture);
+                stApi.release(asSurfaceTexture);
+
+                // Do the Java-side cleanup *before* destroying the EGL context:
+                // eglTerminate resets the thread's JNI TLS state on Adreno, and
+                // any JNI call after that aborts the process.
+                invokeJavaFunction("releaseCaptureSurface",
+                                   "(Landroid/graphics/SurfaceTexture;Landroid/view/Surface;Landroid/os/HandlerThread;)V",
+                                   surfaceTextureGlobal, captureSurfaceGlobal,
+                                   callbackThreadGlobal);
+                stopVirtualDisplay();
+
+                gl_render::destroy(renderer);
+
+                if (surfaceTextureGlobal) env->DeleteGlobalRef(surfaceTextureGlobal);
+                if (captureSurfaceGlobal) env->DeleteGlobalRef(captureSurfaceGlobal);
+                if (callbackThreadGlobal) env->DeleteGlobalRef(callbackThreadGlobal);
+                if (surfaceTexture) env->DeleteLocalRef(surfaceTexture);
+                if (captureSurface) env->DeleteLocalRef(captureSurface);
+                if (callbackThread) env->DeleteLocalRef(callbackThread);
+                AMediaCodec_stop(codec);
+                ANativeWindow_release(inputSurface);
+                AMediaCodec_delete(codec);
+                AMediaFormat_delete(format);
+                env->DeleteLocalRef(javaSurface);
+                if (attached_here) jvm->DetachCurrentThread();
+                return;
+            }
+        }
+
+        // Fallback path (GL renderer unavailable): the VirtualDisplay already
+        // feeds the encoder's input surface directly.
 
         // Start encoder
         status = AMediaCodec_start(codec);
         if (status != AMEDIA_OK) {
             BOOST_LOG(error) << "Failed to start encoder, error code: "sv << status;
             env->DeleteLocalRef(javaSurface);
-            jvm->DetachCurrentThread();
+            if (attached_here) jvm->DetachCurrentThread();
             ANativeWindow_release(inputSurface);
             AMediaCodec_delete(codec);
             AMediaFormat_delete(format);
@@ -637,12 +1112,32 @@ namespace sunshine_callbacks {
         AMediaFormat_delete(format);
 
         // 清理 Java Surface 引用
-        jvm->DetachCurrentThread();
+        if (attached_here) jvm->DetachCurrentThread();
     }
 
     void captureAudioLoop(void *channel_data, safe::mail_t mail, const audio::config_t &config) {
-        samples = std::make_shared<audio::sample_queue_t::element_type>(30);
-        encodeThread(samples, config, channel_data);
+        auto session_samples = std::make_shared<audio::sample_queue_t::element_type>(30);
+        samples = session_samples; // 供 postAudioSample 投递
+
+        auto shutdown_event = mail->event<bool>(mail::shutdown);
+
+        // The encoder thread blocks in samples->pop() until a packet arrives.
+        // After the client disconnects no audio packets come in, so the session
+        // can never be joined unless someone wakes the queue.
+        std::thread stopper([shutdown_event, session_samples]() {
+            while (!shutdown_event->peek()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (session_samples) {
+                session_samples->stop();
+            }
+        });
+
+        encodeThread(session_samples, config, channel_data);
+
+        if (stopper.joinable()) {
+            stopper.join();
+        }
     }
 
     float from_netfloat(netfloat f) {

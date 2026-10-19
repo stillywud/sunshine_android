@@ -29,6 +29,7 @@ add_library(
         input.cpp
         video.cpp
         video_colorspace.cpp
+        gl_renderer.cpp
 )
 
 target_include_directories(sunshine PRIVATE
@@ -45,6 +46,9 @@ target_link_libraries(
         android
         mediandk
         log
+        EGL
+        GLESv2
+        nativewindow
         enet
         ${OPUS_LIBRARY}
         ssl

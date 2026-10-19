@@ -14,7 +14,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.view.Display;
 import android.view.Surface;
+import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.Toast;
 
@@ -35,6 +39,7 @@ public class NativeBridge {
     }
 
     public static native void start();
+    public static native void stop();
 
     public static MediaProjection mediaProjection;
 
@@ -60,9 +65,133 @@ public class NativeBridge {
 
     public static native void submitPin(String pin);
 
+    /**
+     * 设置画面旋转模式（存 SharedPreferences，跨进程共享）
+     * 0=自动，1=左转90°，2=180°，3=右转90°
+     */
+    public static void setRotationMode(int mode) {
+        if (context != null) {
+            context.getSharedPreferences("sunshine_prefs", Context.MODE_PRIVATE)
+                    .edit().putInt("rotation_mode", mode).apply();
+        }
+    }
+
+    /**
+     * 读取画面旋转模式（供 native 层通过 JNI 调用）
+     */
+    public static int getRotationMode() {
+        if (context != null) {
+            return context.getSharedPreferences("sunshine_prefs", Context.MODE_PRIVATE)
+                    .getInt("rotation_mode", 0);
+        }
+        return 0;
+    }
+
+    /**
+     * 返回设备当前屏幕方向：1=竖屏(Configuration.ORIENTATION_PORTRAIT)，
+     * 2=横屏(Configuration.ORIENTATION_LANDSCAPE)，0=未知
+     */
+    public static int getDeviceOrientation() {
+        if (context != null) {
+            return context.getResources().getConfiguration().orientation;
+        }
+        return 0;
+    }
+
+    /**
+     * 逻辑屏幕宽度（px）。GL 旋转管线用它创建与源画面对齐的 VirtualDisplay，
+     * 避免系统按客户端请求尺寸做 letterbox。
+     */
+    public static int getScreenWidth() {
+        if (context != null) {
+            DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+            return metrics.widthPixels;
+        }
+        return 0;
+    }
+
+    /** 逻辑屏幕高度（px），见 getScreenWidth()。 */
+    public static int getScreenHeight() {
+        if (context != null) {
+            DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+            return metrics.heightPixels;
+        }
+        return 0;
+    }
+
+    /**
+     * 屏幕内容相对自然方向的旋转角（0/90/180/270），顺时针。
+     * 用于「自动」模式判断源画面是否需要转 90°。
+     */
+    public static int getDisplayRotation() {
+        if (context != null) {
+            WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+            if (wm != null) {
+                Display display = wm.getDefaultDisplay();
+                switch (display.getRotation()) {
+                    case Surface.ROTATION_90:
+                        return 90;
+                    case Surface.ROTATION_180:
+                        return 180;
+                    case Surface.ROTATION_270:
+                        return 270;
+                    default:
+                        return 0;
+                }
+            }
+        }
+        return 0;
+    }
+
     // 添加发送音频样本的方法
     public static native void postAudioSample(float[] audioData, int sampleCount);
 
+    /** native 侧帧到达通知（由 SurfaceTexture 回调触发） */
+    public static native void onCaptureFrameAvailable();
+
+    /** 在 Java 主线程创建一个 SurfaceTexture + Surface，供 native 采集使用。 */
+    public static Object[] createCaptureSurface(int width, int height) {
+        final android.graphics.SurfaceTexture surfaceTexture =
+                new android.graphics.SurfaceTexture(false);
+        surfaceTexture.setDefaultBufferSize(width, height);
+
+        // Frame callbacks must not share the Flutter UI thread's Looper: under
+        // load the UI thread delays dispatch, and the capture loop stalls.
+        android.os.HandlerThread callbackThread =
+                new android.os.HandlerThread("SunshineFrameCb");
+        callbackThread.start();
+        final android.os.Handler handler = new android.os.Handler(callbackThread.getLooper());
+        surfaceTexture.setOnFrameAvailableListener(st -> {
+            try {
+                onCaptureFrameAvailable();
+            } catch (Throwable ignored) {
+            }
+        }, handler);
+
+        Surface surface = new Surface(surfaceTexture);
+        return new Object[]{surfaceTexture, surface, callbackThread};
+    }
+
+    /** 释放采集 Surface（native 渲染循环退出时调用）。 */
+    public static void releaseCaptureSurface(android.graphics.SurfaceTexture surfaceTexture,
+                                             Surface surface,
+                                             android.os.HandlerThread callbackThread) {
+        try {
+            if (surfaceTexture != null) surfaceTexture.setOnFrameAvailableListener(null);
+        } catch (Exception ignored) {
+        }
+        try {
+            if (surface != null) surface.release();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (surfaceTexture != null) surfaceTexture.release();
+        } catch (Exception ignored) {
+        }
+        if (callbackThread != null) {
+            callbackThread.quitSafely();
+        }
+    }
 
     // surface created by MediaCodec
     public static void createVirtualDisplay(int width, int height, int frameRate, int packetDuration, Surface surface, boolean shouldMute) {

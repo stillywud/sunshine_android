@@ -44,6 +44,8 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _elapsedTime = 0;
   // 当前状态：0-停止，1-运行，2-暂停
   int _state = 0;
+  // 画面旋转模式：0=自动，1=左转90°，2=180°，3=右转90°
+  int _rotationMode = 0;
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -104,6 +106,13 @@ class _StopwatchPageState extends State<StopwatchPage> {
       setState(() {
         address = value;
       });
+    });
+    channel.invokeMethod('getRotationMode').then((value) {
+      if (value is int && mounted) {
+        setState(() {
+          _rotationMode = value;
+        });
+      }
     });
   }
 
@@ -183,6 +192,31 @@ class _StopwatchPageState extends State<StopwatchPage> {
                 border: OutlineInputBorder(),
                 labelText: 'PIN',
               ),
+            ),
+            SizedBox(height: 12),
+            // 画面旋转模式选择
+            Row(
+              children: [
+                const Text('画面旋转：'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(value: 0, label: Text('自动')),
+                      ButtonSegment(value: 1, label: Text('左转90°')),
+                      ButtonSegment(value: 2, label: Text('180°')),
+                      ButtonSegment(value: 3, label: Text('右转90°')),
+                    ],
+                    selected: {_rotationMode},
+                    onSelectionChanged: (Set<int> selected) {
+                      setState(() {
+                        _rotationMode = selected.first;
+                      });
+                      channel.invokeMethod('rotationMode', _rotationMode);
+                    },
+                  ),
+                ),
+              ],
             ),
             SizedBox(height: 12),
             Row(

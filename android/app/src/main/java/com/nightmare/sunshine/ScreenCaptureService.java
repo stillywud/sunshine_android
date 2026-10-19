@@ -33,6 +33,8 @@ public class ScreenCaptureService extends Service {
     private VirtualDisplay virtualDisplay;
 
     private static final String TAG = "SunshineService";
+    /** Service 是否正在运行（由 Service 自己维护，Activity 查询用） */
+    public static volatile boolean isRunning = false;
 
     @Override
     public void onCreate() {
@@ -44,6 +46,12 @@ public class ScreenCaptureService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // START_STICKY 被系统重启时 intent 为 null，此时不做初始化直接返回
+        // 避免 intent.getIntExtra 抛 NPE 导致服务崩溃循环
+        if (intent == null) {
+            Log.w(TAG, "onStartCommand: null intent (system restart), skip init");
+            return START_STICKY;
+        }
         String sunshineName = Build.MANUFACTURER + "-" + Build.MODEL;
         NativeBridge.setSunshineName(sunshineName);
         NativeBridge.setFileStatePath(getFilesDir().getAbsolutePath() + "/sunshine_state.json");
@@ -73,8 +81,13 @@ public class ScreenCaptureService extends Service {
             @Override
             public void run() {
                 NativeBridge.start();
+                // native 服务退出（崩溃或正常结束）：标记置 false 并停 mDNS，
+                // 否则 isRunning 一直为 true，用户无法重启
+                isRunning = false;
+                try { MDNSHelper.stopBroadcast(); } catch (Exception e) { Log.w(TAG, "stopBroadcast failed", e); }
+                Log.w(TAG, "Native server thread exited, isRunning=false, mDNS stopped");
             }
-        }).start();
+        }, "SunshineNative").start();
 
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Screen Capture")
@@ -83,6 +96,8 @@ public class ScreenCaptureService extends Service {
                 .build();
         startForeground(1, notification);
 
+        isRunning = true;
+        Log.i(TAG, "ScreenCaptureService started, isRunning=true");
         return START_STICKY;
     }
 
@@ -120,6 +135,12 @@ public class ScreenCaptureService extends Service {
 
     @Override
     public void onDestroy() {
+        isRunning = false;
+        Log.i(TAG, "ScreenCaptureService destroyed, isRunning=false");
+        // 通知 native 停服（触发 shutdown 事件，http/rtsp 线程退出）
+        try { NativeBridge.stop(); } catch (Exception e) { Log.w(TAG, "NativeBridge.stop failed", e); }
+        // 停止 mDNS 广播，避免重启时多实例冲突
+        try { MDNSHelper.stopBroadcast(); } catch (Exception e) { Log.w(TAG, "stopBroadcast failed", e); }
         super.onDestroy();
         if (virtualDisplay != null) {
             virtualDisplay.release();

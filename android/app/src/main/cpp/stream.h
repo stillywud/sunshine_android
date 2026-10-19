@@ -41,6 +41,19 @@ namespace stream {
 
   void postFrame(std::vector<uint8_t> &&frame_data, int64_t frame_index, bool idr, void* channel_data);
 
+  /**
+   * @brief Keep the UDP broadcast listeners alive for the process lifetime.
+   *
+   * Without this the listeners are destroyed as soon as the last session
+   * reference drops, and a reconnect has to rebind control/video/audio ports
+   * while the old sockets are still closing, so the client times out during
+   * the control-stream handshake.
+   */
+  void pin_broadcast();
+
+  /** Drop the pinned broadcast reference so a restart can rebind its ports. */
+  void unpin_broadcast();
+
   namespace session {
     enum class state_e : int {
       STOPPED,  ///< The session is stopped
