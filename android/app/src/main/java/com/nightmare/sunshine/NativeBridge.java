@@ -195,35 +195,13 @@ public class NativeBridge {
 
     // surface created by MediaCodec
     public static void createVirtualDisplay(int width, int height, int frameRate, int packetDuration, Surface surface, boolean shouldMute) {
-        // create virtual display by MediaProjection
-        // 通过 MediaProjection 创建虚拟显示
+        // Audio playback capture is optional. On some devices (e.g. OnePlus on
+        // Android 12) AudioRecord creation is denied by the audio policy, which
+        // throws IllegalStateException from startRecording(). That used to abort
+        // this method before createVirtualDisplay() below ran, so video never
+        // started at all and the client showed a black screen.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // 配置音频捕获参数
-            int sampleRate = 48000; // 与您的Opus配置匹配
-            int channelConfig = AudioFormat.CHANNEL_IN_STEREO;
-            int audioFormat = AudioFormat.ENCODING_PCM_FLOAT;
-            int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2;
-
-            // 计算每个数据包的帧数 (每个通道的样本数)
-            // packetDuration 是毫秒，所以需要除以1000转换为秒
-            int framesPerPacket = (int) (sampleRate * packetDuration / 1000.0f);
-            AudioPlaybackCaptureConfiguration config = null;
-            config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                    .build();
-            AudioRecord audioRecord = new AudioRecord.Builder()
-                    .setAudioPlaybackCaptureConfig(config)
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setEncoding(audioFormat)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(channelConfig)
-                            .build())
-                    .setBufferSizeInBytes(bufferSize)
-                    .build();
-            audioRecord.startRecording();
-            NativeBridge.startAudioRecording(audioRecord, framesPerPacket);
+            startAudioCapture(packetDuration);
         }
 
         VirtualDisplay virtualDisplay = mediaProjection.createVirtualDisplay(
@@ -234,6 +212,46 @@ public class NativeBridge {
                 null,
                 null
         );
+        Log.i(TAG, "VirtualDisplay created: " + width + "x" + height
+                + " display=" + (virtualDisplay != null));
+    }
+
+    /** 启动音频回采；失败只记日志，不影响视频链路。 */
+    private static void startAudioCapture(int packetDuration) {
+        try {
+            int sampleRate = 48000; // 与您的Opus配置匹配
+            int channelConfig = AudioFormat.CHANNEL_IN_STEREO;
+            int audioFormat = AudioFormat.ENCODING_PCM_FLOAT;
+            int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2;
+
+            // 计算每个数据包的帧数 (每个通道的样本数)
+            // packetDuration 是毫秒，所以需要除以1000转换为秒
+            int framesPerPacket = (int) (sampleRate * packetDuration / 1000.0f);
+            AudioPlaybackCaptureConfiguration config =
+                    new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                            .build();
+            AudioRecord audioRecord = new AudioRecord.Builder()
+                    .setAudioPlaybackCaptureConfig(config)
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(audioFormat)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(channelConfig)
+                            .build())
+                    .setBufferSizeInBytes(bufferSize)
+                    .build();
+            if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+                Log.w(TAG, "AudioRecord not initialized, continuing without audio capture");
+                audioRecord.release();
+                return;
+            }
+            audioRecord.startRecording();
+            NativeBridge.startAudioRecording(audioRecord, framesPerPacket);
+        } catch (Exception e) {
+            Log.w(TAG, "Audio capture unavailable, continuing without it", e);
+        }
     }
 
     public static void stopVirtualDisplay() {

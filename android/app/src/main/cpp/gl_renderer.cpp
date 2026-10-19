@@ -369,9 +369,18 @@ namespace gl_render {
             GL_LOGE("GL error after draw #%d: 0x%x", (int) r.draw_count, draw_error);
         }
         if (r.draw_count < 3) {
-            GL_LOG("draw #%d: tex=%u quad=(%.3f,%.3f) rot=%d",
+            // Read back what we actually rendered: a black frame with a valid
+            // texture means the capture texture never received pixels, while a
+            // black read-back with non-black texture points at the draw path.
+            unsigned char center[4] = {0, 0, 0, 0};
+            glReadPixels(r.dst_width / 2, r.dst_height / 2, 1, 1,
+                         GL_RGBA, GL_UNSIGNED_BYTE, center);
+            GLenum read_error = glGetError();
+            GL_LOG("draw #%d: tex=%u quad=(%.3f,%.3f) rot=%d centerPixel=(%u,%u,%u,%u) "
+                   "readErr=0x%x",
                    (int) r.draw_count, (unsigned) r.texture, scale_x, scale_y,
-                   r.rotation_degrees);
+                   r.rotation_degrees, center[0], center[1], center[2], center[3],
+                   read_error);
         }
         r.draw_count++;
 
