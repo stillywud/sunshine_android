@@ -65,12 +65,17 @@ namespace gl_render {
         }
 
         /**
-         * Visible source aspect after rotation: rotating by 90 or 270 swaps
-         * the axes. Returns scale factors for the quad so the image fills the
-         * encoder frame without distortion.
+         * Compute the quad scale for the encoder frame.
+         *
+         * fit  (fill_mode=false): the whole source stays visible, so the axis
+         *      that would overflow is shrunk and the leftover becomes black bars.
+         * fill (fill_mode=true): the source covers the frame completely, so the
+         *      axis that would leave bars is grown past the viewport and the
+         *      overflow is cropped by the NDC bounds. Aspect ratio is preserved
+         *      either way — only the visible region changes.
          */
         void compute_fit(int rotation, float src_w, float src_h,
-                         float dst_w, float dst_h,
+                         float dst_w, float dst_h, bool fill_mode,
                          float &scale_x, float &scale_y) {
             float visible_w = (rotation == 90 || rotation == 270) ? src_h : src_w;
             float visible_h = (rotation == 90 || rotation == 270) ? src_w : src_h;
@@ -78,8 +83,10 @@ namespace gl_render {
             float src_aspect = visible_w / visible_h;
             float dst_aspect = dst_w / dst_h;
 
-            if (src_aspect > dst_aspect) {
-                // Wider than target: full width, letterbox top/bottom
+            const bool source_is_wider = src_aspect > dst_aspect;
+            if (source_is_wider == !fill_mode) {
+                // fit + wider source, or fill + taller source: shrink the
+                // overflowing axis to match the frame
                 scale_x = 1.0f;
                 scale_y = dst_aspect / src_aspect;
             } else {
@@ -170,12 +177,14 @@ namespace gl_render {
     renderer_t create(ANativeWindow *target,
                       int src_width, int src_height,
                       int dst_width, int dst_height,
-                      int rotation_degrees) {
+                      int rotation_degrees,
+                      bool fill_mode) {
         renderer_t r;
         r.src_width = src_width;
         r.src_height = src_height;
         r.dst_width = dst_width;
         r.dst_height = dst_height;
+        r.fill_mode = fill_mode;
         r.rotation_degrees = ((rotation_degrees % 360) + 360) % 360;
 
         if (r.rotation_degrees % 90 != 0) {
@@ -334,6 +343,7 @@ namespace gl_render {
         compute_fit(r.rotation_degrees,
                     static_cast<float>(r.src_width), static_cast<float>(r.src_height),
                     static_cast<float>(r.dst_width), static_cast<float>(r.dst_height),
+                    r.fill_mode,
                     scale_x, scale_y);
 
         float quad[16];

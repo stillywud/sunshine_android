@@ -39,6 +39,9 @@ namespace gl_render {
         int dst_height = 0;
         int rotation_degrees = 0;
         int draw_count = 0;
+        // false = fit (letterbox, keeps the whole source visible)
+        // true  = fill (crop the overflowing axis, no black bars)
+        bool fill_mode = false;
 
         bool valid = false;
     };
@@ -54,11 +57,14 @@ namespace gl_render {
      * @param dst_width        encoder resolution width  (requested by the client)
      * @param dst_height       encoder resolution height
      * @param rotation_degrees image rotation applied in the shader (0/90/180/270)
+     * @param fill_mode        true to crop-fill the encoder frame (no black bars),
+     *                         false to fit the whole source inside it
      */
     renderer_t create(ANativeWindow *target,
                       int src_width, int src_height,
                       int dst_width, int dst_height,
-                      int rotation_degrees);
+                      int rotation_degrees,
+                      bool fill_mode = false);
 
     /** Draw one frame. tex_matrix comes from SurfaceTexture.getTransformMatrix(). */
     void draw(renderer_t &renderer, const float tex_matrix[16]);

@@ -80,6 +80,14 @@ public class MainActivity extends FlutterActivity {
                     case "getRotationMode":
                         result.success(NativeBridge.getRotationMode());
                         break;
+                    case "fillMode":
+                        int fill = (int) call.arguments;
+                        NativeBridge.setFillMode(fill);
+                        result.success(fill);
+                        break;
+                    case "getFillMode":
+                        result.success(NativeBridge.getFillMode());
+                        break;
                     case "address":
                         String address = MDNSHelper.getWifiIpAddress(getContext());
                         result.success(address);

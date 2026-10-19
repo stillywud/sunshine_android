@@ -30,11 +30,17 @@ class MyApp extends StatelessWidget {
 ///   - 默认：不旋转，竖屏画面居中，两侧黑边
 ///   - 左转90°/右转90°：画面转 90°，正好铺满 16:9
 ///   - 180°：上下颠倒，仍保持竖屏比例居中
+///
+/// [fillMode] 为 true 时改为裁剪铺满：画面放大到盖住整个帧，超出部分被裁掉，
+/// 没有黑边，比例也不变形。
 class RotationPreview extends StatelessWidget {
-  const RotationPreview({super.key, required this.mode});
+  const RotationPreview({super.key, required this.mode, this.fillMode = 0});
 
   /// 0=默认，1=左转90°，2=180°，3=右转90°
   final int mode;
+
+  /// 0=适应（留黑边），1=裁剪铺满（无黑边）
+  final int fillMode;
 
   @override
   Widget build(BuildContext context) {
@@ -46,10 +52,15 @@ class RotationPreview extends StatelessWidget {
     final bool swapped = mode == 1 || mode == 3;
     final double visibleAspect = swapped ? 1 / sourceAspect : sourceAspect;
 
-    // 等比适配：fit 进 16:9 帧
+    final bool fill = fillMode != 0;
+    final bool sourceIsWider = visibleAspect > frameAspect;
+
+    // 与 gl_renderer 的 compute_fit 保持一致：
+    //   fit  : 溢出的轴缩小，留下黑边
+    //   fill : 不足的轴放大，超出部分被裁掉
     final double widthFactor;
     final double heightFactor;
-    if (visibleAspect > frameAspect) {
+    if (sourceIsWider == !fill) {
       widthFactor = 1.0;
       heightFactor = frameAspect / visibleAspect;
     } else {
@@ -68,12 +79,14 @@ class RotationPreview extends StatelessWidget {
           children: [
             const Text('预览：', style: TextStyle(fontSize: 13)),
             const SizedBox(width: 6),
-            Text(
-              _modeLabel(mode),
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.primary,
-                fontWeight: FontWeight.w600,
+            Flexible(
+              child: Text(
+                _modeLabel(mode, fill),
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -87,6 +100,7 @@ class RotationPreview extends StatelessWidget {
               border: Border.all(color: Colors.black87),
               borderRadius: BorderRadius.circular(6),
             ),
+            clipBehavior: Clip.hardEdge,
             child: Center(
               child: FractionallySizedBox(
                 widthFactor: widthFactor * 0.92,
@@ -104,17 +118,23 @@ class RotationPreview extends StatelessWidget {
     );
   }
 
-  String _modeLabel(int mode) {
+  String _modeLabel(int mode, bool fill) {
+    final String base;
     switch (mode) {
       case 1:
-        return '左转90°（铺满，无黑边）';
+        base = '左转90°';
+        break;
       case 2:
-        return '180°（倒立）';
+        base = '180°（倒立）';
+        break;
       case 3:
-        return '右转90°（铺满，无黑边）';
+        base = '右转90°';
+        break;
       default:
-        return '默认（不旋转，两侧黑边）';
+        base = '默认（不旋转）';
+        break;
     }
+    return fill ? '$base · 裁剪铺满' : '$base · 适应（留黑边）';
   }
 
   /// 模拟一块竖屏手机屏幕，用可辨识的图形让旋转方向一目了然
@@ -194,6 +214,8 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _state = 0;
   // 画面旋转模式：0=默认（不旋转），1=左转90°，2=180°，3=右转90°
   int _rotationMode = 0;
+  // 填充方式：0=适应（留黑边），1=裁剪铺满（无黑边）
+  int _fillMode = 0;
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -259,6 +281,13 @@ class _StopwatchPageState extends State<StopwatchPage> {
       if (value is int && mounted) {
         setState(() {
           _rotationMode = value;
+        });
+      }
+    });
+    channel.invokeMethod('getFillMode').then((value) {
+      if (value is int && mounted) {
+        setState(() {
+          _fillMode = value;
         });
       }
     });
@@ -368,9 +397,32 @@ class _StopwatchPageState extends State<StopwatchPage> {
                   ),
                 ],
               ),
+              SizedBox(height: 10),
+              // 填充方式：比例不匹配时是留黑边还是裁掉边缘铺满
+              Row(
+                children: [
+                  const Text('填充方式：'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 0, label: Text('适应')),
+                        ButtonSegment(value: 1, label: Text('裁剪铺满')),
+                      ],
+                      selected: {_fillMode},
+                      onSelectionChanged: (Set<int> selected) {
+                        setState(() {
+                          _fillMode = selected.first;
+                        });
+                        channel.invokeMethod('fillMode', _fillMode);
+                      },
+                    ),
+                  ),
+                ],
+              ),
               SizedBox(height: 12),
               // 旋转效果预览：选完模式立刻能看到实际传输效果
-              RotationPreview(mode: _rotationMode),
+              RotationPreview(mode: _rotationMode, fillMode: _fillMode),
               SizedBox(height: 12),
               Row(
                 spacing: 16,

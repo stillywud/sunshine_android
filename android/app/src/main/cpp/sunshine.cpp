@@ -537,6 +537,21 @@ namespace sunshine_callbacks {
         return mode;
     }
 
+    /** 读取画面填充方式：0=适应（留黑边），1=裁剪铺满（无黑边） */
+    bool query_fill_mode(JNIEnv *env) {
+        jmethodID m = env->GetStaticMethodID(sunshineServerClass, "getFillMode", "()I");
+        if (!m) {
+            return false;
+        }
+        int mode = env->CallStaticIntMethod(sunshineServerClass, m);
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return false;
+        }
+        return mode != 0;
+    }
+
     // ------------------------------------------------------------------
     // ASurfaceTexture is API 28+, but minSdk is 26. Resolve it at runtime so
     // the library still loads on older devices and the rotation path simply
@@ -747,18 +762,22 @@ namespace sunshine_callbacks {
                 break;
         }
 
+        const bool fill_mode = query_fill_mode(env);
+
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
                             "screen=%dx%d displayRotation=%d mode=%d -> glRotation=%d "
-                            "encoder=%dx%d",
+                            "fill=%d encoder=%dx%d",
                             screen.width, screen.height, screen.rotation, mode,
-                            rotation_degrees, config.width, config.height);
+                            rotation_degrees, fill_mode ? 1 : 0,
+                            config.width, config.height);
 
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "creating GL renderer...");
         gl_render::renderer_t renderer = gl_render::create(
                 inputSurface,
                 screen.width, screen.height,
                 config.width, config.height,
-                rotation_degrees);
+                rotation_degrees,
+                fill_mode);
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "GL renderer created, valid=%d",
                             renderer.valid ? 1 : 0);
 
