@@ -38,6 +38,27 @@ static JNIEnv *g_env = nullptr;
 static jclass sunshineServerClass = nullptr;
 static audio::sample_queue_t samples = nullptr;
 
+// 服务端是否在运行。start() 进入时置 true，主循环退出时置 false，
+// 供 stop() 与 UI 状态轮询读取。
+static std::atomic<bool> g_server_running {false};
+
+// 当前连上来的客户端数量。由 stream.cpp 在会话建立/销毁时增减。
+static std::atomic<int> g_client_count {0};
+
+} // extern "C"
+
+// stream.cpp 是 C++ 编译单元，这两个函数必须用 C++ 链接名，不能放进
+// extern "C" 块里，否则链接阶段会报 undefined symbol。
+void client_count_increment() {
+    g_client_count.fetch_add(1);
+}
+
+void client_count_decrement() {
+    g_client_count.fetch_sub(1);
+}
+
+extern "C" {
+
 // 声明全局变量来存储音频录制状态
 static std::thread audioRecordingThread;
 
@@ -178,11 +199,10 @@ jobject convertMapToJavaHashMap(JNIEnv *env, const std::map<std::string, std::an
 
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
-    static std::atomic<bool> server_running {false};
-    if (server_running.exchange(true)) {
+    if (g_server_running.exchange(true)) {
         // The native server owns process-global state (mail bus, UDP broadcast
         // listeners, task pool). Starting it twice would duplicate all of that,
-        // so a second Start from the UI is a no-op until the process restarts.
+        // so a second Start from the UI is a no-op until Stop is pressed.
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
                             "native server already running, ignoring duplicate start");
         return;
@@ -194,18 +214,31 @@ Java_com_nightmare_sunshine_NativeBridge_start(JNIEnv *env, jclass clazz) {
     sunshineServerClass = (jclass) env->NewGlobalRef(clazz);
     if (sunshineServerClass == nullptr) {
         BOOST_LOG(error) << "Failed to create global reference for SunshineServer class"sv;
-        server_running.store(false);
+        g_server_running.store(false);
         return;
     }
     deinit = logging::init(1, "/dev/null");
     BOOST_LOG(info) << "Start sunshine server"sv;
     // log sunshineServerClass
     BOOST_LOG(info) << "sunshineServerClass: "sv << sunshineServerClass;
+    // 每次启动从干净状态开始
+    g_client_count.store(0);
+    // 丢掉上一轮固定住的广播上下文（UDP 控制/视频/音频监听）。不丢的话
+    // 复用那份已经 shutdown 的上下文，客户端会报 control stream 建立失败。
+    stream::unpin_broadcast();
     mail::man = std::make_shared<safe::mail_raw_t>();
     task_pool.start(1);
     std::thread httpThread{nvhttp::start};
     rtsp_stream::rtpThread();
     httpThread.join();
+    // nvhttp::start() 只在 shutdown 事件被 raise 之后才返回，此时 RTSP 线程也
+    // 正在退出。这里清掉标志，让下一次 Start 能重新把监听拉起来。
+    task_pool.stop();
+    task_pool.join();
+    g_client_count.store(0);
+    g_server_running.store(false);
+    __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                        "native server main loop exited, running=0");
 }
 
 JNIEXPORT void JNICALL
@@ -251,24 +284,53 @@ Java_com_nightmare_sunshine_NativeBridge_onCaptureFrameAvailable(JNIEnv *env, jc
 }
 
 /**
- * Stop the native server. ScreenCaptureService.onDestroy() calls this, so the
- * symbol must exist even when the server thread is not running.
+ * 停止 native 服务端。
  *
- * The broadcast listeners are pinned for the process lifetime so reconnects do
- * not race with port rebinding; releasing the pin here lets them shut down
- * before the next start binds the same ports again.
+ * nvhttp::start() 的收尾是 `shutdown_event->view()` 之后停 https/tcp 并 join，
+ * rtpThread() 的循环也以同一个 shutdown 事件为退出条件，所以 raise 这个事件
+ * 就能让两个监听线程有序退出并释放端口。
  */
 JNIEXPORT void JNICALL
 Java_com_nightmare_sunshine_NativeBridge_stop(JNIEnv *env, jclass clazz) {
-    // The native server owns process-global state (mail bus, UDP broadcast
-    // listeners, task pool) that cannot be rebuilt safely inside the same
-    // process, so this never tears the server down. Its only job is to exist:
-    // ScreenCaptureService.onDestroy() calls it, and the JVM would abort with
-    // UnsatisfiedLinkError if the symbol were missing.
+    if (!g_server_running.load()) {
+        __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                            "stop: server not running, nothing to do");
+        return;
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
+                        "stop: raising shutdown event");
+    if (mail::man) {
+        auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+        if (shutdown_event) {
+            shutdown_event->raise(true);
+        }
+    }
+
+    // 注意：这里刻意不调用 stream::unpin_broadcast()。
     //
-    // Sessions are still ended the normal way: when the client disconnects the
-    // ENet disconnect handler stops the session, and the RTSP/HTTP listeners
-    // keep running so the next Start serves new clients.
+    // 广播上下文（UDP 控制/视频/音频监听）在引用计数归零时会走 end_broadcast
+    // 销毁套接字，而重启时 ref() 会重新构造它。但实测发现：unpin 之后第二次
+    // start 虽然能重新绑定端口，RTSP 的 accept 循环却不再响应新的握手请求，
+    // 客户端会一直卡在 "启动中 RTSP handshake"。广播上下文按设计就是进程级
+    // 常驻的（见 stream.h 里 pin_broadcast 的注释），保持它常驻最稳。
+
+    // 计数归零：会话线程随 shutdown 一起退出，之后的连接不会再建立。
+    g_client_count.store(0);
+    // 注意：这里不直接清 g_server_running，交给 start() 的主循环在
+    // httpThread.join() 返回后复位，避免端口还没释放就允许再次 Start。
+}
+
+/** 服务端是否在运行（供 UI 状态轮询）。 */
+JNIEXPORT jboolean JNICALL
+Java_com_nightmare_sunshine_NativeBridge_isServerRunning(JNIEnv *env, jclass clazz) {
+    return g_server_running.load() ? JNI_TRUE : JNI_FALSE;
+}
+
+/** 当前连上来的客户端数量（供 UI 显示）。 */
+JNIEXPORT jint JNICALL
+Java_com_nightmare_sunshine_NativeBridge_getClientCount(JNIEnv *env, jclass clazz) {
+    return g_client_count.load();
 }
 
 JNIEXPORT void JNICALL

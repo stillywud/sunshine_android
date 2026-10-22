@@ -4,6 +4,8 @@
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
+#include <android/log.h>
+
 extern "C" {
 #include <moonlight-common-c/src/Limelight-internal.h>
 #include <moonlight-common-c/src/Rtsp.h>
@@ -608,25 +610,41 @@ namespace rtsp_stream {
     std::shared_ptr<socket_t> next_socket;
   };
 
-  rtsp_server_t server {};
+  /**
+   * RTSP 服务器实例。
+   *
+   * 它持有 io_context / acceptor / 会话表，这些成员一旦 stop() 就不能复用，
+   * 所以用 unique_ptr 在每次 rtpThread() 开始时重建一个全新实例，
+   * 让「停止服务端后再次启动」能够真正重新监听。
+   */
+  std::unique_ptr<rtsp_server_t> server;
 
   void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    server.session_raise(std::move(launch_session));
+    if (server) {
+      server->session_raise(std::move(launch_session));
+    }
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
-    server.session_clear(launch_session_id);
+    if (server) {
+      server->session_clear(launch_session_id);
+    }
   }
 
   int session_count() {
+    if (!server) {
+      return 0;
+    }
     // Ensure session_count is up-to-date
-    server.clear(false);
+    server->clear(false);
 
-    return server.session_count();
+    return server->session_count();
   }
 
   void terminate_sessions() {
-    server.clear(true);
+    if (server) {
+      server->clear(true);
+    }
   }
 
   int send(tcp::socket &sock, const std::string_view &sv) {
@@ -1105,18 +1123,22 @@ namespace rtsp_stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
+    // 每次启动都重建 RTSP 服务器实例：旧的 io_context/acceptor/socket
+    // 在上一轮停止后已经不可复用，复用会让 while 循环立刻退出。
+    server = std::make_unique<rtsp_server_t>();
+
     // Keep the UDP listeners alive across sessions so reconnects do not race
     // with port rebinding.
     stream::pin_broadcast();
 
-    server.map("OPTIONS"sv, &cmd_option);
-    server.map("DESCRIBE"sv, &cmd_describe);
-    server.map("SETUP"sv, &cmd_setup);
-    server.map("ANNOUNCE"sv, &cmd_announce);
-    server.map("PLAY"sv, &cmd_play);
+    server->map("OPTIONS"sv, &cmd_option);
+    server->map("DESCRIBE"sv, &cmd_describe);
+    server->map("SETUP"sv, &cmd_setup);
+    server->map("ANNOUNCE"sv, &cmd_announce);
+    server->map("PLAY"sv, &cmd_play);
 
     boost::system::error_code ec;
-    if (server.bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
+    if (server->bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
       BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << ec.message();
       shutdown_event->raise(true);
 
@@ -1124,17 +1146,17 @@ namespace rtsp_stream {
     }
 
     while (!shutdown_event->peek()) {
-      server.iterate(std::min(500ms, config::stream.ping_timeout));
+      server->iterate(std::min(500ms, config::stream.ping_timeout));
 
 //      if (broadcast_shutdown_event->peek()) {
 //        server.clear();
 //      } else {
         // cleanup all stopped sessions
-        server.clear(false);
+        server->clear(false);
 //      }
     }
 
-    server.clear();
+    server->clear();
   }
 
   void print_msg(PRTSP_MESSAGE msg) {

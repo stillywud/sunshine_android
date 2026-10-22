@@ -39,6 +39,28 @@ public class MainActivity extends FlutterActivity {
             @Override
             public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
                 switch (call.method) {
+                    case "stop":
+                        // 真正停服：停前台服务（释放 MediaProjection 与 mDNS），
+                        // 再让 native 主循环收到 shutdown 事件退出并释放端口。
+                        Log.i("SunshineMain", "stop: stopping server");
+                        try {
+                            NativeBridge.stop();
+                        } catch (Exception e) {
+                            Log.w("SunshineMain", "NativeBridge.stop failed", e);
+                        }
+                        try {
+                            stopService(new Intent(MainActivity.this, ScreenCaptureService.class));
+                        } catch (Exception e) {
+                            Log.w("SunshineMain", "stopService failed", e);
+                        }
+                        result.success(true);
+                        break;
+                    case "serverStatus":
+                        // 返回 "运行中|客户端数"，UI 每秒轮询刷新指示灯
+                        result.success(
+                                (NativeBridge.isServerRunning() ? "1" : "0")
+                                        + "|" + NativeBridge.getClientCount());
+                        break;
                     case "start":
                         // 若服务已在运行：先停服再走启动流程，保证重连时是干净状态
                         if (ScreenCaptureService.isRunning) {

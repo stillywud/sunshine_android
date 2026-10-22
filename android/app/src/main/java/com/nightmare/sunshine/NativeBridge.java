@@ -41,6 +41,12 @@ public class NativeBridge {
     public static native void start();
     public static native void stop();
 
+    /** 服务端是否在运行（native 主循环状态）。 */
+    public static native boolean isServerRunning();
+
+    /** 当前连上来的客户端数量。 */
+    public static native int getClientCount();
+
     public static MediaProjection mediaProjection;
 
     public static native void setSunshineName(String sunshineName);

@@ -35,6 +35,10 @@ extern "C" {
 #include "utility.h"
 #include "sunshine.h"
 
+// 客户端计数器定义在 sunshine.cpp，这里只声明（C++ 链接）。
+void client_count_increment();
+void client_count_decrement();
+
 #define IDX_START_A 0
 #define IDX_START_B 1
 #define IDX_INVALIDATE_REF_FRAMES 2
@@ -459,24 +463,34 @@ namespace stream {
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
 
   /**
-   * @brief Pin the broadcast context for the lifetime of the process.
+   * @brief Pin the broadcast context so the UDP listeners survive between
+   *        sessions and only rebind when the server is restarted.
    *
    * The UDP control/video/audio listeners are torn down when the last
    * broadcast reference drops. That happens as soon as a session ends, so a
    * reconnect would have to rebind every port while the previous sockets are
    * still closing, and clients time out on the control handshake.
    *
-   * Holding one reference here keeps the listeners alive across sessions.
+   * 用可重置的静态指针而不是 static 局部对象：static 局部对象只初始化一次，
+   * 服务端重启时会一直持有第一次那份（已被 shutdown 的）上下文，导致
+   * 客户端报 "control stream establishment" 失败。
    */
-  decltype(broadcast)::ptr_t &pinned_broadcast_ref() {
-    static auto pinned = broadcast.ref();
+  std::unique_ptr<decltype(broadcast)::ptr_t> &pinned_broadcast_slot() {
+    static std::unique_ptr<decltype(broadcast)::ptr_t> pinned;
     return pinned;
+  }
+
+  decltype(broadcast)::ptr_t &pinned_broadcast_ref() {
+    auto &slot = pinned_broadcast_slot();
+    if (!slot) {
+      slot = std::make_unique<decltype(broadcast)::ptr_t>(broadcast.ref());
+    }
+    return *slot;
   }
 
   /** Drop the pinned reference so a fresh server start can rebind cleanly. */
   void unpin_broadcast() {
-    auto &pinned = pinned_broadcast_ref();
-    pinned = decltype(broadcast)::ptr_t {};
+    pinned_broadcast_slot().reset();
   }
 
   session_t *control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
@@ -1081,6 +1095,8 @@ namespace stream {
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
             pos = server->_sessions->erase(pos);
+            // 会话销毁即从“已连接客户端”里扣掉。
+            client_count_decrement();
 
             if (session->control.peer) {
               {
@@ -1962,6 +1978,8 @@ namespace stream {
         auto lg = session.broadcast_ref->control_server._sessions.lock();
         session.broadcast_ref->control_server._sessions->push_back(&session);
       }
+      // 会话建立即计入“已连接客户端”，供服务端界面显示。
+      client_count_increment();
 
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);

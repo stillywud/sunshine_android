@@ -216,6 +216,12 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _rotationMode = 0;
   // 填充方式：0=适应（留黑边），1=裁剪铺满（无黑边）
   int _fillMode = 0;
+  // 服务端是否在运行（由 native 主循环状态决定）
+  bool _serverRunning = false;
+  // 当前连上来的客户端数量
+  int _clientCount = 0;
+  // 状态轮询定时器
+  Timer? _statusTimer;
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -266,7 +272,27 @@ class _StopwatchPageState extends State<StopwatchPage> {
   @override
   void dispose() {
     _timer?.cancel();
+    _statusTimer?.cancel();
     super.dispose();
+  }
+
+  /// 轮询服务端运行状态与客户端数量，用于界面指示灯。
+  void _refreshServerStatus() {
+    channel.invokeMethod('serverStatus').then((value) {
+      if (value is String && mounted) {
+        final parts = value.split('|');
+        if (parts.length == 2) {
+          final bool running = parts[0] == '1';
+          final int clients = int.tryParse(parts[1]) ?? 0;
+          if (running != _serverRunning || clients != _clientCount) {
+            setState(() {
+              _serverRunning = running;
+              _clientCount = clients;
+            });
+          }
+        }
+      }
+    });
   }
 
   @override
@@ -291,6 +317,10 @@ class _StopwatchPageState extends State<StopwatchPage> {
         });
       }
     });
+    _statusTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _refreshServerStatus();
+    });
+    _refreshServerStatus();
   }
 
   @override
@@ -424,13 +454,74 @@ class _StopwatchPageState extends State<StopwatchPage> {
               // 旋转效果预览：选完模式立刻能看到实际传输效果
               RotationPreview(mode: _rotationMode, fillMode: _fillMode),
               SizedBox(height: 12),
+              // 运行状态指示：颜色 + 文案 + 已连客户端数
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: _serverRunning
+                      ? const Color(0xFFE8F5E9)
+                      : const Color(0xFFF5F5F5),
+                  border: Border.all(
+                    color: _serverRunning
+                        ? const Color(0xFF66BB6A)
+                        : const Color(0xFFBDBDBD),
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: _serverRunning
+                            ? const Color(0xFF43A047)
+                            : const Color(0xFF9E9E9E),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _serverRunning ? '服务端运行中' : '服务端未运行',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _serverRunning
+                            ? const Color(0xFF2E7D32)
+                            : const Color(0xFF616161),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Icon(
+                      Icons.devices,
+                      size: 16,
+                      color: _clientCount > 0
+                          ? const Color(0xFF2E7D32)
+                          : const Color(0xFF9E9E9E),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '已连接客户端：$_clientCount',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: _clientCount > 0
+                            ? const Color(0xFF2E7D32)
+                            : const Color(0xFF616161),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(height: 12),
               Row(
                 spacing: 16,
                 children: [
                   TextButton(
-                    onPressed: () {
-                      channel.invokeMethod('start');
-                    },
+                    onPressed: _serverRunning
+                        ? null
+                        : () {
+                            channel.invokeMethod('start');
+                          },
                     style: TextButton.styleFrom(
                       backgroundColor: Theme.of(context).colorScheme.primary,
                     ),
@@ -445,6 +536,37 @@ class _StopwatchPageState extends State<StopwatchPage> {
                           'Start Server',
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.onPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _serverRunning
+                        ? () {
+                            channel.invokeMethod('stop');
+                          }
+                        : null,
+                    style: TextButton.styleFrom(
+                      backgroundColor: _serverRunning
+                          ? const Color(0xFFD32F2F)
+                          : null,
+                    ),
+                    child: Row(
+                      spacing: 4,
+                      children: [
+                        Icon(
+                          Icons.stop,
+                          color: _serverRunning
+                              ? const Color(0xFFFFFFFF)
+                              : const Color(0xFF9E9E9E),
+                        ),
+                        Text(
+                          'Stop Server',
+                          style: TextStyle(
+                            color: _serverRunning
+                                ? const Color(0xFFFFFFFF)
+                                : const Color(0xFF9E9E9E),
                           ),
                         ),
                       ],
