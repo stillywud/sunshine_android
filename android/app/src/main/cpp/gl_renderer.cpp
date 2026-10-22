@@ -67,15 +67,14 @@ namespace gl_render {
         /**
          * Compute the quad scale for the encoder frame.
          *
-         * fit  (fill_mode=false): the whole source stays visible, so the axis
-         *      that would overflow is shrunk and the leftover becomes black bars.
-         * fill (fill_mode=true): the source covers the frame completely, so the
-         *      axis that would leave bars is grown past the viewport and the
-         *      overflow is cropped by the NDC bounds. Aspect ratio is preserved
-         *      either way — only the visible region changes.
+         * fill_mode 0 = auto：旋转后源为横向则裁剪铺满，竖向则等比适应。
+         * 1 = 强制适应：溢出的轴缩小，留下黑边，完整内容可见。
+         * 2 = 强制裁剪铺满：不足的轴放大，超出部分被裁掉。
+         *
+         * 两种方式都保持宽高比，只改变可见区域。
          */
         void compute_fit(int rotation, float src_w, float src_h,
-                         float dst_w, float dst_h, bool fill_mode,
+                         float dst_w, float dst_h, int fill_mode,
                          float &scale_x, float &scale_y) {
             float visible_w = (rotation == 90 || rotation == 270) ? src_h : src_w;
             float visible_h = (rotation == 90 || rotation == 270) ? src_w : src_h;
@@ -83,8 +82,10 @@ namespace gl_render {
             float src_aspect = visible_w / visible_h;
             float dst_aspect = dst_w / dst_h;
 
+            const bool fill = fill_mode == 0 ? (src_aspect > 1.0f) : (fill_mode == 2);
+
             const bool source_is_wider = src_aspect > dst_aspect;
-            if (source_is_wider == !fill_mode) {
+            if (source_is_wider == !fill) {
                 // fit + wider source, or fill + taller source: shrink the
                 // overflowing axis to match the frame
                 scale_x = 1.0f;
@@ -178,7 +179,7 @@ namespace gl_render {
                       int src_width, int src_height,
                       int dst_width, int dst_height,
                       int rotation_degrees,
-                      bool fill_mode) {
+                      int fill_mode) {
         renderer_t r;
         r.src_width = src_width;
         r.src_height = src_height;

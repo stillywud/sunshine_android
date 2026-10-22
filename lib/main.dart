@@ -23,41 +23,42 @@ class MyApp extends StatelessWidget {
   }
 }
 
-/// 画面旋转效果预览。
+/// 画面效果预览。
 ///
-/// 用 16:9 的编码帧模拟客户端屏幕，把一块 9:16 的"手机屏幕"按当前旋转模式
-/// 摆进去，让用户在连接之前就能直观看到实际传输效果：
-///   - 默认：不旋转，竖屏画面居中，两侧黑边
-///   - 左转90°/右转90°：画面转 90°，正好铺满 16:9
-///   - 180°：上下颠倒，仍保持竖屏比例居中
+/// 用 16:9 的编码帧模拟客户端屏幕，按源画面方向展示实际传输效果：
+///   - 竖向内容（例如手机竖屏刷短剧）：等比适应，两侧黑边
+///   - 横向内容（例如手机横屏看视频）：裁剪铺满，无黑边
 ///
-/// [fillMode] 为 true 时改为裁剪铺满：画面放大到盖住整个帧，超出部分被裁掉，
-/// 没有黑边，比例也不变形。
+/// 两种效果由服务端根据源画面方向自动选择，用户不需要手动配置；
+/// 这里的「竖向 / 横向」只是预览切换，用来分别查看两种源方向下的结果。
 class RotationPreview extends StatelessWidget {
-  const RotationPreview({super.key, required this.mode, this.fillMode = 0});
+  const RotationPreview({
+    super.key,
+    required this.mode,
+    required this.landscape,
+  });
 
   /// 0=默认，1=左转90°，2=180°，3=右转90°
   final int mode;
 
-  /// 0=适应（留黑边），1=裁剪铺满（无黑边）
-  final int fillMode;
+  /// true=预览横向源的效果，false=预览竖向源的效果
+  final bool landscape;
 
   @override
   Widget build(BuildContext context) {
-    // 源画面是竖屏手机屏幕（模拟 9:16），客户端帧是 16:9
-    const double sourceAspect = 9 / 16;
     const double frameAspect = 16 / 9;
+    // 横向内容用 16:9 源，竖向内容用 9:16 源
+    final double sourceAspect = landscape ? 16 / 9 : 9 / 16;
 
     // 旋转 90/270 后源画面的可见宽高互换
     final bool swapped = mode == 1 || mode == 3;
     final double visibleAspect = swapped ? 1 / sourceAspect : sourceAspect;
 
-    final bool fill = fillMode != 0;
+    // 与服务端 compute_fit 的 auto 规则保持一致：
+    // 旋转后源为横向 -> 裁剪铺满；为竖向 -> 等比适应
+    final bool fill = visibleAspect > 1.0;
     final bool sourceIsWider = visibleAspect > frameAspect;
 
-    // 与 gl_renderer 的 compute_fit 保持一致：
-    //   fit  : 溢出的轴缩小，留下黑边
-    //   fill : 不足的轴放大，超出部分被裁掉
     final double widthFactor;
     final double heightFactor;
     if (sourceIsWider == !fill) {
@@ -137,7 +138,7 @@ class RotationPreview extends StatelessWidget {
     return fill ? '$base · 裁剪铺满' : '$base · 适应（留黑边）';
   }
 
-  /// 模拟一块竖屏手机屏幕，用可辨识的图形让旋转方向一目了然
+  /// 模拟一块手机屏幕，用可辨识的图形让旋转方向一目了然
   Widget _phoneScreen() {
     return Container(
       decoration: BoxDecoration(
@@ -214,8 +215,8 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _state = 0;
   // 画面旋转模式：0=默认（不旋转），1=左转90°，2=180°，3=右转90°
   int _rotationMode = 0;
-  // 填充方式：0=适应（留黑边），1=裁剪铺满（无黑边）
-  int _fillMode = 0;
+  // 预览方向：0=竖向源，1=横向源（只影响预览，实际由服务端按源方向自动判断）
+  int _previewOrientation = 0;
   // 服务端是否在运行（由 native 主循环状态决定）
   bool _serverRunning = false;
   // 当前连上来的客户端数量
@@ -307,13 +308,6 @@ class _StopwatchPageState extends State<StopwatchPage> {
       if (value is int && mounted) {
         setState(() {
           _rotationMode = value;
-        });
-      }
-    });
-    channel.invokeMethod('getFillMode').then((value) {
-      if (value is int && mounted) {
-        setState(() {
-          _fillMode = value;
         });
       }
     });
@@ -428,31 +422,34 @@ class _StopwatchPageState extends State<StopwatchPage> {
                 ],
               ),
               SizedBox(height: 10),
-              // 填充方式：比例不匹配时是留黑边还是裁掉边缘铺满
+              // 预览方向：切换查看「源是竖向」和「源是横向」两种情况下客户端看到的样子。
+              // 这里只影响预览，实际填充方式由服务端按源画面方向自动决定。
               Row(
                 children: [
-                  const Text('填充方式：'),
+                  const Text('预览方向：'),
                   const SizedBox(width: 8),
                   Expanded(
                     child: SegmentedButton<int>(
                       segments: const [
-                        ButtonSegment(value: 0, label: Text('适应')),
-                        ButtonSegment(value: 1, label: Text('裁剪铺满')),
+                        ButtonSegment(value: 0, label: Text('竖向')),
+                        ButtonSegment(value: 1, label: Text('横向')),
                       ],
-                      selected: {_fillMode},
+                      selected: {_previewOrientation},
                       onSelectionChanged: (Set<int> selected) {
                         setState(() {
-                          _fillMode = selected.first;
+                          _previewOrientation = selected.first;
                         });
-                        channel.invokeMethod('fillMode', _fillMode);
                       },
                     ),
                   ),
                 ],
               ),
               SizedBox(height: 12),
-              // 旋转效果预览：选完模式立刻能看到实际传输效果
-              RotationPreview(mode: _rotationMode, fillMode: _fillMode),
+              // 效果预览：显示该源方向下客户端实际看到的画面
+              RotationPreview(
+                mode: _rotationMode,
+                landscape: _previewOrientation == 1,
+              ),
               SizedBox(height: 12),
               // 运行状态指示：颜色 + 文案 + 已连客户端数
               Container(

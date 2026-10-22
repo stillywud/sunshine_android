@@ -94,26 +94,6 @@ public class NativeBridge {
     }
 
     /**
-     * 设置画面填充方式（存 SharedPreferences，跨进程共享）
-     * 0=适应（等比缩放，可能留黑边），1=裁剪铺满（裁掉超出部分，无黑边）
-     */
-    public static void setFillMode(int mode) {
-        if (context != null) {
-            context.getSharedPreferences("sunshine_prefs", Context.MODE_PRIVATE)
-                    .edit().putInt("fill_mode", mode).apply();
-        }
-    }
-
-    /** 读取画面填充方式（供 native 层通过 JNI 调用） */
-    public static int getFillMode() {
-        if (context != null) {
-            return context.getSharedPreferences("sunshine_prefs", Context.MODE_PRIVATE)
-                    .getInt("fill_mode", 0);
-        }
-        return 0;
-    }
-
-    /**
      * 返回设备当前屏幕方向：1=竖屏(Configuration.ORIENTATION_PORTRAIT)，
      * 2=横屏(Configuration.ORIENTATION_LANDSCAPE)，0=未知
      */

@@ -599,21 +599,6 @@ namespace sunshine_callbacks {
         return mode;
     }
 
-    /** 读取画面填充方式：0=适应（留黑边），1=裁剪铺满（无黑边） */
-    bool query_fill_mode(JNIEnv *env) {
-        jmethodID m = env->GetStaticMethodID(sunshineServerClass, "getFillMode", "()I");
-        if (!m) {
-            return false;
-        }
-        int mode = env->CallStaticIntMethod(sunshineServerClass, m);
-        if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-            return false;
-        }
-        return mode != 0;
-    }
-
     // ------------------------------------------------------------------
     // ASurfaceTexture is API 28+, but minSdk is 26. Resolve it at runtime so
     // the library still loads on older devices and the rotation path simply
@@ -824,13 +809,15 @@ namespace sunshine_callbacks {
                 break;
         }
 
-        const bool fill_mode = query_fill_mode(env);
+        // Fill mode is always automatic: 旋转后为横向的源裁剪铺满编码帧，
+        // 竖向的源等比适应（留黑边）。
+        const int fill_mode = 0;
 
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot",
                             "screen=%dx%d displayRotation=%d mode=%d -> glRotation=%d "
                             "fill=%d encoder=%dx%d",
                             screen.width, screen.height, screen.rotation, mode,
-                            rotation_degrees, fill_mode ? 1 : 0,
+                            rotation_degrees, fill_mode,
                             config.width, config.height);
 
         __android_log_print(ANDROID_LOG_INFO, "SunshineRot", "creating GL renderer...");
