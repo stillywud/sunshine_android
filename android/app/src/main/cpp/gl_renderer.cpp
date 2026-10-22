@@ -67,11 +67,12 @@ namespace gl_render {
         /**
          * Compute the quad scale for the encoder frame.
          *
-         * fill_mode 0 = auto：旋转后源为横向则裁剪铺满，竖向则等比适应。
-         * 1 = 强制适应：溢出的轴缩小，留下黑边，完整内容可见。
-         * 2 = 强制裁剪铺满：不足的轴放大，超出部分被裁掉。
-         *
-         * 两种方式都保持宽高比，只改变可见区域。
+         * fill_mode 0 = auto：始终等比适应，保证源画面完整可见、比例不变形。
+         *              比例不一致时在编码帧里留黑边，客户端会看到同样的黑边，
+         *              但绝不会有内容被裁掉（例如竖向手机左转90°后，
+         *              左上角的系统时间也完整可见）。
+         * 1 = 强制适应（与 auto 一致，保留以便调试）
+         * 2 = 强制裁剪铺满：放大到盖满帧，超出部分被裁掉
          */
         void compute_fit(int rotation, float src_w, float src_h,
                          float dst_w, float dst_h, int fill_mode,
@@ -82,7 +83,8 @@ namespace gl_render {
             float src_aspect = visible_w / visible_h;
             float dst_aspect = dst_w / dst_h;
 
-            const bool fill = fill_mode == 0 ? (src_aspect > 1.0f) : (fill_mode == 2);
+            // 只有显式要求裁剪铺满时才裁内容，其余一律等比适应
+            const bool fill = (fill_mode == 2);
 
             const bool source_is_wider = src_aspect > dst_aspect;
             if (source_is_wider == !fill) {

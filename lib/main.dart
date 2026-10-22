@@ -54,9 +54,8 @@ class RotationPreview extends StatelessWidget {
     final bool swapped = mode == 1 || mode == 3;
     final double visibleAspect = swapped ? 1 / sourceAspect : sourceAspect;
 
-    // 与服务端 compute_fit 的 auto 规则保持一致：
-    // 旋转后源为横向 -> 裁剪铺满；为竖向 -> 等比适应
-    final bool fill = visibleAspect > 1.0;
+    // 与服务端 compute_fit 的 auto 规则保持一致：始终等比适应，完整可见
+    final bool fill = false;
     final bool sourceIsWider = visibleAspect > frameAspect;
 
     final double widthFactor;
