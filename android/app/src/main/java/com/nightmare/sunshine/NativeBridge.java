@@ -123,54 +123,62 @@ public class NativeBridge {
      * 按当前实际显示方向返回屏幕尺寸：[width, height]。
      * 横屏时返回 宽>高，竖屏时返回 高>宽。
      *
-     * 不能只信 DisplayMetrics/getRotation()：当某个视频 App 自己强制横屏全屏
-     * 播放（手机物理没转）时，getRotation() 仍是 0，getRealSize() 返回自然
-     * 方向的 1080x2340，而屏幕实际显示的是 2340x1080。这种情况下源被误判成
-     * 竖向，客户端就只能看到中间一小块、四周全黑。
+     * 各数据源在真机上的实测行为（视频 App 自己全屏横屏时的真实日志）：
      *
-     * 因此这里用 Configuration.orientation 交叉校验：它反映当前窗口/显示的
-     * 方向，App 强制横屏时会变成 LANDSCAPE，而 getRotation() 不会。
+     *   getRealSize()       = 2340x1080  ← 正确
+     *   getRealMetrics()    = 2340x1080  ← 正确
+     *   getRotation()       = 1 (90°)    ← 正确
+     *   getSize()           = 1080x2340  ← 错（未旋转）
+     *   resourcesMetrics    = 1080x2340  ← 错（未旋转）
+     *   configOrientation   = 1 (PORTRAIT) ← 错（前台已是横屏视频，但本机没更新）
+     *
+     * 所以只认 getRealSize() / getRealMetrics()，它们会跟随显示方向的 override。
+     *
+     * 千万不要再用 Configuration.orientation 交叉校验：上面这组日志里它是错的，
+     * 会把已经正确的 2340x1080 强行交换成 1080x2340，导致横屏源被当成竖屏，
+     * 客户端只显示中间一小块。
      */
     private static int[] getPhysicalDisplaySize() {
         if (context == null) {
             return new int[]{0, 0};
         }
 
-        DisplayMetrics metrics = context.getResources().getDisplayMetrics();
-        int width = metrics.widthPixels;
-        int height = metrics.heightPixels;
+        int width = 0;
+        int height = 0;
 
-        // 兜底：DisplayMetrics 拿不到时退回 Display.getRealSize()
+        WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        Display display = wm != null ? wm.getDefaultDisplay() : null;
+
+        // 首选 getRealSize()：会返回当前显示方向下的真实尺寸
+        if (display != null) {
+            Point realSize = new Point();
+            display.getRealSize(realSize);
+            width = realSize.x;
+            height = realSize.y;
+        }
+
+        // 次选 getRealMetrics()
         if (width <= 0 || height <= 0) {
-            WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
-            Display display = wm != null ? wm.getDefaultDisplay() : null;
             if (display != null) {
-                Point realSize = new Point();
-                display.getRealSize(realSize);
-                width = realSize.x;
-                height = realSize.y;
+                DisplayMetrics dm = new DisplayMetrics();
+                display.getRealMetrics(dm);
+                width = dm.widthPixels;
+                height = dm.heightPixels;
             }
+        }
+
+        // 最后兜底：资源指标（自然方向，可能未旋转）
+        if (width <= 0 || height <= 0) {
+            DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+            width = metrics.widthPixels;
+            height = metrics.heightPixels;
         }
 
         if (width <= 0 || height <= 0) {
             return new int[]{0, 0};
         }
 
-        // App 自己强制横屏时，系统 override 了显示方向但 getRotation() 不变。
-        // Configuration.orientation 反映的是当前窗口/显示的方向，用它交叉校验。
-        Configuration config = context.getResources().getConfiguration();
-        boolean configLandscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE;
-        boolean sizeLandscape = width > height;
-
-        if (configLandscape != sizeLandscape) {
-            Log.i(TAG, "display size mismatch: " + width + "x" + height
-                    + " configOrientation=" + config.orientation
-                    + " -> swapping to match config");
-            int tmp = width;
-            width = height;
-            height = tmp;
-        }
-
+        Log.i(TAG, "display size = " + width + "x" + height);
         return new int[]{width, height};
     }
 
