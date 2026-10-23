@@ -33,21 +33,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class DlnaStreamer {
     private static final String TAG = "DlnaStreamer";
 
-    /**
-     * 编码参数。
-     *
-     * 分辨率：960x540 在 1080p 屏幕上放大后偏糊，提到 720p。
-     *
-     * 帧率 25：不是不想给 60，而是实测 60fps 会让延迟显著变差。
-     * 接收端播放器的内部队列是按「帧数」缓冲的，60fps 下同样的时间窗口
-     * 里堆的帧数是 25fps 的 2.4 倍，用户实际看到的画面反而更滞后。
-     * 实测 60fps 时端到端延迟约 20 秒，25fps 时约 1 秒。
-     * 要 60fps 又低延迟，得能控制接收端缓冲深度——DLNA 协议没有这个能力。
-     *
-     * 码率 3Mbps：720p25 下这个量级足够保画质，局域网毫无压力。
-     *
-     * I 帧间隔 2 秒：每秒一个关键帧会显著抬高平均码率。
-     */
+    // Keep the existing 720p25 / 3 Mbps profile while isolating transport and
+    // receiver buffering changes. Configured FPS does not bound encoder output
+    // on every device; observed FPS must be measured separately.
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
     private static final int FPS = 25;
@@ -294,9 +282,11 @@ public class DlnaStreamer {
         audioError = null;
         DlnaAudioCapture capture = new DlnaAudioCapture();
         String error = capture.start(projection, (data, codecConfig) -> {
-            byte[] ts = muxer.pushAudioRaw(data, codecConfig);
-            if (ts != null) {
-                httpServer.write(ts);
+            synchronized (muxer) {
+                byte[] ts = muxer.pushAudioRaw(data, codecConfig);
+                if (ts != null) {
+                    httpServer.write(ts);
+                }
             }
             if (!codecConfig) {
                 audioFrameCount++;
@@ -444,7 +434,7 @@ public class DlnaStreamer {
 
             while (running.get()) {
                 try {
-                    int index = encoder.dequeueOutputBuffer(info, 50);
+                    int index = encoder.dequeueOutputBuffer(info, 10_000);
                     if (index >= 0) {
                         ByteBuffer buf = encoder.getOutputBuffer(index);
                         if (buf != null && info.size > 0) {
@@ -465,7 +455,9 @@ public class DlnaStreamer {
                                 lastFrame = raw;
                                 lastWasKey = keyFrame;
 
-                                emitFrame(muxer.pushVideo(buf, info), keyFrame);
+                                synchronized (muxer) {
+                                    emitFrame(muxer.pushVideo(buf, info), keyFrame);
+                                }
                                 frameCount++;
                                 videoFrameCount = frameCount;
                                 lastSentAt = System.currentTimeMillis();
@@ -494,8 +486,14 @@ public class DlnaStreamer {
                     if (lastFrame != null && now - lastSentAt >= repeatTriggerMs) {
                         // 补帧不计入 videoFrameCount：那是「真实编码帧」的统计，
                         // 混进补帧会让帧率看起来比配置高，误导排查。
-                        emitFrame(muxer.pushVideoRaw(lastFrame, lastWasKey), lastWasKey);
+                        synchronized (muxer) {
+                            emitFrame(muxer.pushVideoRaw(lastFrame, lastWasKey), lastWasKey);
+                        }
                         lastSentAt = now;
+                    }
+                    synchronized (muxer) {
+                        byte[] clock = muxer.pollClock();
+                        if (clock != null) { httpServer.write(clock); }
                     }
                 } catch (IllegalStateException e) {
                     break;
@@ -513,13 +511,7 @@ public class DlnaStreamer {
         if (ts == null) {
             return;
         }
-        if (keyFrame) {
-            // 这批数据以 PAT/PMT + SPS/PPS 开头，
-            // 记下它的起始位置，新连接从这里开始推，
-            // 播放器才能立刻拿到节目表和解码参数
-            httpServer.markKeyframe();
-        }
-        httpServer.write(ts);
+        httpServer.write(ts, keyFrame);
     }
 
     /**

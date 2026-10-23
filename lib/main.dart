@@ -795,11 +795,16 @@ class _StopwatchPageState extends State<StopwatchPage> {
                           _statItem('视频', '${_dlnaStats!.videoFrames} 帧'),
                           _statItem('音频', '${_dlnaStats!.audioFrames} 帧'),
                           _statItem(
-                            '积压',
+                            '发送积压',
                             '${_dlnaStats!.backlogSeconds} 秒',
                             warn: _dlnaStats!.backlogSeconds > 3,
                           ),
                         ],
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text('发送积压不包含电视或播放器内部缓冲',
+                            style: TextStyle(fontSize: 11, color: Colors.black54)),
                       ),
                       if (!_dlnaStats!.clientActive)
                         const Padding(

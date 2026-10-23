@@ -59,6 +59,7 @@ public class DlnaTsMuxer {
 
     /** 首帧 PTS 的起始偏移（微秒）。部分播放器不接受 0。 */
     private static final long PTS_START_US = 1_000_000L;
+    private static final byte[] ACCESS_UNIT_DELIMITER = {0, 0, 0, 1, 9, (byte) 0xF0};
 
     private final int fps;
     /**
@@ -101,6 +102,39 @@ public class DlnaTsMuxer {
     private long audioBaseUs = -1;
     /** 上一个视频帧的 PTS，用于强制单调递增 */
     private long lastVideoPtsUs;
+    private long lastPcrNs;
+    private long lastPcrBase = -1;
+
+    /** Keep the declared PCR PID alive even when a static screen produces no video. */
+    public synchronized byte[] pollClock() {
+        if (epochUs < 0 || System.nanoTime() - lastPcrNs < 80_000_000L) { return null; }
+        byte[] packet = new byte[TS_PACKET_SIZE];
+        java.util.Arrays.fill(packet, (byte) 0xFF);
+        packet[0] = 0x47;
+        packet[1] = (byte) (PID_VIDEO >>> 8);
+        packet[2] = (byte) PID_VIDEO;
+        // Adaptation-only packets repeat the previous payload's continuity counter.
+        packet[3] = (byte) (0x20 | ((continuity[PID_VIDEO] + 15) & 15));
+        packet[4] = (byte) 183;
+        packet[5] = 0x10;
+        writePcr(packet);
+        return packet;
+    }
+
+    private void writePcr(byte[] packet) {
+        long now = System.nanoTime();
+        long clockUs = now / 1000L - epochUs + PTS_START_US;
+        long base = Math.max(lastPcrBase + 1, clockUs * PTS_CLOCK / 1_000_000L);
+        lastPcrBase = base;
+        lastPcrNs = now;
+        base &= 0x1FFFFFFFFL;
+        packet[6] = (byte) (base >>> 25);
+        packet[7] = (byte) (base >>> 17);
+        packet[8] = (byte) (base >>> 9);
+        packet[9] = (byte) (base >>> 1);
+        packet[10] = (byte) (((base & 1) << 7) | 0x7E);
+        packet[11] = 0;
+    }
 
     public DlnaTsMuxer(int fps, boolean hasAudio) {
         this(fps, hasAudio, 48_000);
@@ -206,7 +240,10 @@ public class DlnaTsMuxer {
             writePatPmtIfNeeded();
         }
 
-        writePes(PID_VIDEO, payload, videoPtsUs, true);
+        // Explicit AU boundaries let TS demuxers emit a frame without scanning
+        // ahead into the next slice. Put AUD before SPS/PPS on random access.
+        payload = concat(ACCESS_UNIT_DELIMITER, payload);
+        writePes(PID_VIDEO, payload, videoPtsUs, true, keyFrame);
         return take();
     }
 
@@ -247,7 +284,7 @@ public class DlnaTsMuxer {
         writePatPmtIfNeeded();
 
         byte[] adts = addAdtsHeader(aacFrame);
-        writePes(PID_AUDIO, adts, audioPtsUs, false);
+        writePes(PID_AUDIO, adts, audioPtsUs, false, false);
         return take();
     }
 
@@ -436,7 +473,7 @@ public class DlnaTsMuxer {
     // PES
     // ------------------------------------------------------------------
 
-    private void writePes(int pid, byte[] payload, long ptsUs, boolean video) {
+    private void writePes(int pid, byte[] payload, long ptsUs, boolean video, boolean keyFrame) {
         long pts = (ptsUs * PTS_CLOCK) / 1_000_000L;
 
         ByteArrayOutputStream pes = new ByteArrayOutputStream(payload.length + 32);
@@ -467,30 +504,35 @@ public class DlnaTsMuxer {
         pes.write(payload, 0, payload.length);
         byte[] pesBytes = pes.toByteArray();
 
-        writePesPayload(pid, pesBytes);
+        writePesPayload(pid, pesBytes, video ? pts : -1, keyFrame);
     }
 
-    private void writePesPayload(int pid, byte[] data) {
+    private void writePesPayload(int pid, byte[] data, long pcrBase, boolean keyFrame) {
         int offset = 0;
         boolean first = true;
         while (offset < data.length) {
-            boolean last = (data.length - offset) <= PAYLOAD_CAPACITY;
-            int n = Math.min(PAYLOAD_CAPACITY, data.length - offset);
+            boolean withPcr = first && pcrBase >= 0;
+            // adaptation_field_length + flags + 6-byte PCR require 8 bytes.
+            int capacity = PAYLOAD_CAPACITY - (withPcr ? 8 : 0);
+            int n = Math.min(capacity, data.length - offset);
 
             byte[] packet = new byte[TS_PACKET_SIZE];
             packet[0] = (byte) SYNC_BYTE;
             packet[1] = (byte) ((first ? 0x40 : 0x00) | ((pid >> 8) & 0x1F));
             packet[2] = (byte) (pid & 0xFF);
 
-            if (last && n < PAYLOAD_CAPACITY) {
+            if (withPcr || n < PAYLOAD_CAPACITY) {
                 // 用 adaptation field 补齐，避免浪费
                 int stuffing = PAYLOAD_CAPACITY - n - 1;
                 packet[3] = (byte) (0x30 | (continuity[pid] & 0x0F)); // AF + payload
                 packet[4] = (byte) stuffing;
                 if (stuffing > 0) {
-                    packet[5] = 0x00; // flags
+                    packet[5] = (byte) (withPcr ? (0x10 | (keyFrame ? 0x40 : 0)) : 0);
                     for (int i = 6; i < TS_HEADER_SIZE + 1 + stuffing; i++) {
                         packet[i] = (byte) 0xFF;
+                    }
+                    if (withPcr) {
+                        writePcr(packet);
                     }
                 }
                 System.arraycopy(data, offset, packet,
