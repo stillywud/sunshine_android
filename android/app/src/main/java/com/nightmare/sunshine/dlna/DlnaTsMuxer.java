@@ -86,6 +86,22 @@ public class DlnaTsMuxer {
     private int audioSampleRate;
     private boolean patPmtWritten;
 
+    /**
+     * 两条轨的统一时间基准（System.nanoTime 的微秒表示）。
+     *
+     * 视频和音频是两条独立线程产出的，启动时刻天然不同（实测差了 47 秒）。
+     * 如果两条轨各自从 PTS_START_US 起算，音视频的时间轴会彻底错开，
+     * 播放器表现为画面和声音不同步，而且 PTS 跨度远超真实时长。
+     *
+     * 所以用「第一条出帧的轨的时刻」作为共同零点，另一条轨的首帧 PTS
+     * 按它自己的真实启动延迟顺延。这样两条轨的时间轴就对齐了。
+     */
+    private volatile long epochUs = -1;
+    /** 音频首帧相对共用零点的 PTS 基准（微秒），-1 表示还没定 */
+    private long audioBaseUs = -1;
+    /** 上一个视频帧的 PTS，用于强制单调递增 */
+    private long lastVideoPtsUs;
+
     public DlnaTsMuxer(int fps, boolean hasAudio) {
         this(fps, hasAudio, 48_000);
     }
@@ -159,9 +175,24 @@ public class DlnaTsMuxer {
         //
         // 投屏是实时流，帧率固定，用「帧序号 × 帧间隔」生成 PTS 最稳，
         // 也天然保证严格单调递增。
-        // PTS 从 1 秒起算（部分播放器不接受 0 作为首帧 PTS），
-        // 之后按固定帧间隔严格递增。
-        videoPtsUs = PTS_START_US + videoFrameIndex * (1_000_000L / fps);
+        //
+        // 但两条轨必须共用同一个时间零点，否则音视频各算各的会错开
+        // （实测差了 47 秒，表现为音画不同步）。见 epochUs 的注释。
+        //
+        // 这里还有一层：不能用「帧序号 × 标称帧率」算 PTS，因为实际出帧速度
+        // 可能远低于标称值（模拟器上实测只跑到 10.8fps，配置是 25fps）。
+        // 那样算出来的时间轴会跑得比真实时间快，音频按真实采样率走，
+        // 两条轨就会越差越远。
+        //
+        // 做法：视频 PTS 直接取真实经过时间。但要防抖动/回退——
+        // 系统时间在卡顿时可能不走或跳变，PTS 一旦回退播放器就出错，
+        // 所以强制比上一帧至少大 1ms。
+        long pts = elapsedUsSince(epochFor(true)) + PTS_START_US;
+        if (pts <= lastVideoPtsUs) {
+            pts = lastVideoPtsUs + 1_000L;
+        }
+        lastVideoPtsUs = pts;
+        videoPtsUs = pts;
         videoFrameIndex++;
 
         // 关键帧是播放器唯一能开始解码的位置（关键帧前面带 SPS/PPS）。
@@ -199,10 +230,18 @@ public class DlnaTsMuxer {
             return null;
         }
 
-        // 音频 PTS 同样不能透传编码器时间戳。AAC 每帧固定 1024 个采样点，
-        // 按帧数推导天然单调递增，也天然与真实播放速度一致。
-        audioPtsUs = PTS_START_US + audioFrameIndex * (1_000_000L * AAC_SAMPLES_PER_FRAME
-                / audioSampleRate);
+        // 音频 PTS 用「采样点计数」推导，这本身就是最准确的时间基准：
+        // AAC 每帧固定 1024 采样点，48kHz 下一帧正好 21.33ms，
+        // 天然严格单调、天然与真实播放速度一致，比读系统时钟更稳。
+        //
+        // 关键是要和视频共用同一个时间零点，否则视频先跑几十秒、
+        // 音频后启动时，两条轨的时间轴会错开。
+        if (audioBaseUs < 0) {
+            // 首帧：记下相对共用零点的真实启动延迟
+            audioBaseUs = PTS_START_US + elapsedUsSince(epochFor(false));
+        }
+        audioPtsUs = audioBaseUs
+                + audioFrameIndex * (1_000_000L * AAC_SAMPLES_PER_FRAME / audioSampleRate);
         audioFrameIndex++;
 
         writePatPmtIfNeeded();
@@ -210,6 +249,30 @@ public class DlnaTsMuxer {
         byte[] adts = addAdtsHeader(aacFrame);
         writePes(PID_AUDIO, adts, audioPtsUs, false);
         return take();
+    }
+
+    /**
+     * 取得本轨首帧相对 PTS_START_US 的偏移（微秒），并维护两轨共用的时间零点。
+     *
+     * 视频和音频由两条独立线程产出，启动时刻天然不同（实测差了 47 秒）。
+     * 如果两条轨都从 PTS_START_US 起算，时间轴就彻底错开，播放器表现为
+     * 音画不同步。所以：
+     *   - 第一条出帧的轨把当前时刻记为共用零点
+     *   - 后到的轨也从同一个零点起算，它的首帧 PTS 自然就带上了启动延迟
+     *
+     * 这样两条轨的 PTS 都等于「相对共用零点的真实经过时间」，
+     * 天然与真实时间一致，也不会因为实际帧率低于标称值而漂移。
+     */
+    private long epochFor(boolean video) {
+        if (epochUs < 0) {
+            epochUs = System.nanoTime() / 1000L;
+        }
+        return epochUs;
+    }
+
+    /** 相对给定零点的真实经过时间（微秒）。 */
+    private long elapsedUsSince(long epoch) {
+        return System.nanoTime() / 1000L - epoch;
     }
 
     /** 给裸 AAC 帧加 7 字节 ADTS 头（无 CRC）。 */

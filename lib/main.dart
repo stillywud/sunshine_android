@@ -23,6 +23,56 @@ class MyApp extends StatelessWidget {
   }
 }
 
+/// DLNA 投屏的运行统计，来自 Java 侧 DlnaStreamer.getStats()。
+///
+/// 这些数字是排查「画面延迟大、卡顿、音画不同步」的直接依据：
+///   bitrate    真实出网码率，和编码配置对比能看出有没有被网络卡住
+///   backlog    编码产出比接收端拉走多出来的数据，换算成秒。
+///              这个值持续增长就说明接收端吞吐不够，画面会越来越滞后
+///   clientActive 接收端是否还在持续拉流，false 说明它已经断开或卡死
+class DlnaStats {
+  final int bitrate;
+  final int videoFrames;
+  final int audioFrames;
+  final int servedBytes;
+  final int clients;
+  final bool clientActive;
+  final int backlogSeconds;
+
+  const DlnaStats({
+    required this.bitrate,
+    required this.videoFrames,
+    required this.audioFrames,
+    required this.servedBytes,
+    required this.clients,
+    required this.clientActive,
+    required this.backlogSeconds,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is DlnaStats &&
+      other.bitrate == bitrate &&
+      other.videoFrames == videoFrames &&
+      other.audioFrames == audioFrames &&
+      other.servedBytes == servedBytes &&
+      other.clients == clients &&
+      other.clientActive == clientActive &&
+      other.backlogSeconds == backlogSeconds;
+
+  @override
+  int get hashCode => Object.hash(bitrate, videoFrames, audioFrames,
+      servedBytes, clients, clientActive, backlogSeconds);
+
+  String get bitrateText => bitrate >= 1000000
+      ? '${(bitrate / 1000000).toStringAsFixed(2)} Mbps'
+      : '${(bitrate / 1000).toStringAsFixed(0)} kbps';
+
+  String get servedText => servedBytes >= 1048576
+      ? '${(servedBytes / 1048576).toStringAsFixed(1)} MB'
+      : '${(servedBytes / 1024).toStringAsFixed(0)} KB';
+}
+
 /// 画面效果预览。
 ///
 /// 用 16:9 的编码帧模拟客户端屏幕，按源画面方向展示实际传输效果：
@@ -230,7 +280,26 @@ class _StopwatchPageState extends State<StopwatchPage> {
   bool _dlnaHasAudio = false;
   // 没有音频时的原因（例如系统版本太低）
   String _dlnaAudioError = '';
+  // 运行统计（码率、帧数、积压等），调试用
+  DlnaStats? _dlnaStats;
   List<Map<String, dynamic>> _dlnaDevices = [];
+
+  /// 运行统计里的一项：标签 + 数值，数值可标红提醒。
+  Widget _statItem(String label, String value, {bool warn = false}) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('$label ',
+            style: const TextStyle(fontSize: 11, color: Color(0xFF757575))),
+        Text(value,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: warn ? const Color(0xFFD32F2F) : const Color(0xFF212121),
+            )),
+      ],
+    );
+  }
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -306,7 +375,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
     // DLNA 投屏状态同步（授权回来之后是异步启动的，靠轮询感知）
     channel.invokeMethod('dlnaStatus').then((value) {
       if (value is String && mounted) {
-        // 格式：运行中|接收端名|流地址|音频状态
+        // 格式：运行中|接收端名|流地址|音频状态|运行统计
         final parts = value.split('|');
         if (parts.length >= 4) {
           final bool running = parts[0] == '1';
@@ -315,15 +384,35 @@ class _StopwatchPageState extends State<StopwatchPage> {
           final bool hasAudio = audio == 'a';
           final String audioError =
               audio.startsWith('e:') ? audio.substring(2) : '';
+
+          // 运行统计：码率|视频帧|音频帧|出网字节|连接数|接收端活跃|积压秒
+          DlnaStats? stats;
+          if (parts.length >= 5 && parts[4].isNotEmpty) {
+            final s = parts[4].split(',');
+            if (s.length >= 7) {
+              stats = DlnaStats(
+                bitrate: int.tryParse(s[0]) ?? 0,
+                videoFrames: int.tryParse(s[1]) ?? 0,
+                audioFrames: int.tryParse(s[2]) ?? 0,
+                servedBytes: int.tryParse(s[3]) ?? 0,
+                clients: int.tryParse(s[4]) ?? 0,
+                clientActive: s[5] == '1',
+                backlogSeconds: int.tryParse(s[6]) ?? 0,
+              );
+            }
+          }
+
           if (running != _dlnaRunning ||
               target != _dlnaTarget ||
               hasAudio != _dlnaHasAudio ||
-              audioError != _dlnaAudioError) {
+              audioError != _dlnaAudioError ||
+              stats != _dlnaStats) {
             setState(() {
               _dlnaRunning = running;
               _dlnaTarget = target;
               _dlnaHasAudio = hasAudio;
               _dlnaAudioError = audioError;
+              _dlnaStats = stats;
             });
           }
         }
@@ -675,6 +764,61 @@ class _StopwatchPageState extends State<StopwatchPage> {
                               fontSize: 12, color: Color(0xFFE65100)),
                         ),
                       ),
+                    ],
+                  ),
+                ),
+              // 运行统计：只在投屏中显示，用来排查延迟/卡顿/音画不同步。
+              // 关键看两个数：码率是否接近上限、积压秒数是否在涨。
+              if (_dlnaRunning && _dlnaStats != null)
+                Container(
+                  margin: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFE0E0E0)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('运行状态',
+                          style: TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 16,
+                        runSpacing: 4,
+                        children: [
+                          _statItem('码率', _dlnaStats!.bitrateText),
+                          _statItem('出网', _dlnaStats!.servedText),
+                          _statItem('连接', '${_dlnaStats!.clients}'),
+                          _statItem('视频', '${_dlnaStats!.videoFrames} 帧'),
+                          _statItem('音频', '${_dlnaStats!.audioFrames} 帧'),
+                          _statItem(
+                            '积压',
+                            '${_dlnaStats!.backlogSeconds} 秒',
+                            warn: _dlnaStats!.backlogSeconds > 3,
+                          ),
+                        ],
+                      ),
+                      if (!_dlnaStats!.clientActive)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6),
+                          child: Text(
+                            '接收端已停止拉流（可能已断开或卡住）',
+                            style: TextStyle(
+                                fontSize: 11, color: Color(0xFFD32F2F)),
+                          ),
+                        )
+                      else if (_dlnaStats!.backlogSeconds > 3)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6),
+                          child: Text(
+                            '积压持续增长说明接收端吞吐不足，画面会越来越滞后',
+                            style: TextStyle(
+                                fontSize: 11, color: Color(0xFFE65100)),
+                          ),
+                        ),
                     ],
                   ),
                 ),

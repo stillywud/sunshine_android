@@ -121,16 +121,18 @@ public class MainActivity extends FlutterActivity {
                     case "dlnaStatus": {
                         boolean running = dlnaStreamer != null && dlnaStreamer.isRunning();
                         if (!running) {
-                            result.success("0|||");
+                            result.success("0||||");
                             break;
                         }
-                        // 格式：运行中|接收端名|流地址|音频状态
+                        // 格式：运行中|接收端名|流地址|音频状态|运行统计
                         // 音频状态："a" 表示有音频，"e:<原因>" 表示没音频及原因
+                        // 运行统计见 DlnaStreamer.getStats()
                         String audio = dlnaStreamer.hasAudio()
                                 ? "a"
                                 : "e:" + dlnaStreamer.getAudioError();
                         result.success("1|" + dlnaStreamer.getTargetName()
-                                + "|" + dlnaStreamer.getMediaUrl() + "|" + audio);
+                                + "|" + dlnaStreamer.getMediaUrl() + "|" + audio
+                                + "|" + dlnaStreamer.getStats());
                         break;
                     }
                     case "stop":

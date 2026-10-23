@@ -193,6 +193,27 @@ public class DlnaHttpServer {
         }
     }
 
+    /** 累计已推送给接收端的字节数（真实出网流量，和编码产出量不同）。 */
+    private volatile long servedBytes;
+
+    public long servedBytes() {
+        return servedBytes;
+    }
+
+    /** 当前活跃的 HTTP 连接数。0 表示接收端没在拉流。 */
+    private volatile int clientCount;
+
+    public int clientCount() {
+        return clientCount;
+    }
+
+    /** 最近一次有数据发出的时刻（毫秒） */
+    private volatile long lastServedAt;
+
+    public long lastServedAt() {
+        return lastServedAt;
+    }
+
     private void acceptLoop() {
         while (running) {
             try {
@@ -210,6 +231,7 @@ public class DlnaHttpServer {
 
     private void handle(Socket socket) {
         String remote = String.valueOf(socket.getRemoteSocketAddress());
+        clientCount++;
         try {
             socket.setSoTimeout(15000);
             InputStream in = socket.getInputStream();
@@ -321,6 +343,7 @@ public class DlnaHttpServer {
         } catch (Exception e) {
             Log.w(TAG, "连接结束 " + remote + ": " + e.getMessage());
         } finally {
+            clientCount--;
             try {
                 socket.close();
             } catch (IOException ignored) {
@@ -396,7 +419,9 @@ public class DlnaHttpServer {
             out.write(chunk);
             out.flush();
             cursor += chunk.length;
-            lastWrite = System.currentTimeMillis();
+            servedBytes += chunk.length;
+            lastServedAt = System.currentTimeMillis();
+            lastWrite = lastServedAt;
         }
     }
 

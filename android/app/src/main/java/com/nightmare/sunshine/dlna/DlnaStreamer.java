@@ -33,12 +33,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class DlnaStreamer {
     private static final String TAG = "DlnaStreamer";
 
-    /** 编码参数。1080p 对多数投屏接收端够用，码率不宜太高。 */
-    private static final int WIDTH = 960;
-    private static final int HEIGHT = 540;
+    /**
+     * 编码参数。
+     *
+     * 960x540 在 1080p 的手机屏幕上放大后偏糊，投屏场景主要是看文档/网页/视频，
+     * 清晰度优先，所以提到 720p。码率 2.5Mbps 是局域网下的保守值——
+     * 实测无损需求的画面（桌面静止）远低于这个数，动态场景才吃满。
+     *
+     * I 帧间隔从 1 秒放宽到 2 秒：每秒一个关键帧会显著抬高平均码率，
+     * 而投屏只需要「新接入能尽快出画面」，2 秒足够，代价可接受。
+     */
+    private static final int WIDTH = 1280;
+    private static final int HEIGHT = 720;
     private static final int FPS = 25;
-    private static final int BITRATE = 1_200_000;
-    private static final int I_FRAME_INTERVAL = 1; // 秒
+    private static final int BITRATE = 2_500_000;
+    private static final int I_FRAME_INTERVAL = 2; // 秒
     private static final String MIME_TS = "video/mp2t";
 
     private final Context context;
@@ -61,6 +70,18 @@ public class DlnaStreamer {
     private String audioError;
     /** 已产出的音频帧数，只用于日志 */
     private volatile long audioFrameCount;
+
+    // ---- 运行统计（给界面调试用）----
+    /** 已产出的视频帧数 */
+    private volatile long videoFrameCount;
+    /** 当前实测码率（bits/秒），按最近一段窗口计算 */
+    private volatile long measuredBitrate;
+    /** 已发送给接收端的总字节数（即接收端实际拉走的数据量） */
+    private volatile long bytesServed;
+    /** 接收端连接数，用于判断接收端是否在持续拉流 */
+    private volatile int activeClients;
+    /** 接收端最近一次拉流的时刻 */
+    private volatile long lastClientActivityAt;
 
     public DlnaStreamer(Context context) {
         this.context = context.getApplicationContext();
@@ -86,6 +107,36 @@ public class DlnaStreamer {
     /** 音频不可用的原因（没有音频时才有意义） */
     public String getAudioError() {
         return audioError != null ? audioError : "";
+    }
+
+    /**
+     * 运行统计，给界面调试用。
+     *
+     * 字段用逗号分隔（外层 status 串用竖线分隔）：
+     *   码率bps,视频帧,音频帧,出网字节,连接数,接收端是否活跃(0/1),积压秒数
+     *
+     * 「积压秒数」是个关键指标：它等于（编码产出的流长度 − 接收端已拉走的字节）
+     * 换算成时间。数值大说明接收端拉不过来，画面会明显落后于实时。
+     */
+    public String getStats() {
+        long backlog = 0;
+        if (httpServer != null) {
+            long produced = httpServer.streamLength();
+            long served = httpServer.servedBytes();
+            long lag = produced - served;
+            if (lag > 0) {
+                long bytesPerSec = Math.max(1, measuredBitrate / 8);
+                backlog = lag / bytesPerSec;
+            }
+        }
+        boolean clientActive = httpServer != null
+                && httpServer.clientCount() > 0
+                && System.currentTimeMillis() - httpServer.lastServedAt() < 3000;
+        return measuredBitrate + "," + videoFrameCount + "," + audioFrameCount
+                + "," + (httpServer != null ? httpServer.servedBytes() : 0)
+                + "," + (httpServer != null ? httpServer.clientCount() : 0)
+                + "," + (clientActive ? 1 : 0)
+                + "," + backlog;
     }
 
     private String audioSuffix() {
@@ -369,6 +420,8 @@ public class DlnaStreamer {
         keyframeThread.setDaemon(true);
         keyframeThread.start();
 
+        startStatsThread();
+
         drainThread = new Thread(() -> {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             long frameCount = 0;
@@ -377,11 +430,20 @@ public class DlnaStreamer {
             // 最近一帧的编码数据（含是否关键帧），静止时用来重复发送
             byte[] lastFrame = null;
             boolean lastWasKey = false;
-            long lastFrameAt = System.currentTimeMillis();
+            // 上一次「真正发出一帧」（真实帧或补帧）的时刻
+            long lastSentAt = System.currentTimeMillis();
+
+            // 补帧的最小间隔。必须和编码器的出帧节奏错开，
+            // 否则补帧会和真实帧叠在一起，让时间轴前进得比真实时间快。
+            //
+            // 实测踩过：原来按 2 个帧间隔补帧，但补帧也会让 muxer 的帧计数 +1，
+            // 于是视频轨 PTS 前进速度变成真实时间的 1.54 倍（38.4 对 25 fps），
+            // 播放端表现为画面越跑越超前、音画不同步。
+            final long repeatIntervalMs = Math.max(2, 1000L / FPS);
 
             while (running.get()) {
                 try {
-                    int index = encoder.dequeueOutputBuffer(info, 200);
+                    int index = encoder.dequeueOutputBuffer(info, 50);
                     if (index >= 0) {
                         ByteBuffer buf = encoder.getOutputBuffer(index);
                         if (buf != null && info.size > 0) {
@@ -404,8 +466,9 @@ public class DlnaStreamer {
 
                                 emitFrame(muxer.pushVideo(buf, info), keyFrame);
                                 frameCount++;
-                                lastFrameAt = System.currentTimeMillis();
-                                long now = lastFrameAt;
+                                videoFrameCount = frameCount;
+                                lastSentAt = System.currentTimeMillis();
+                                long now = lastSentAt;
                                 if (now - lastLog > 5000) {
                                     lastLog = now;
                                     Log.i(TAG, "已编码 " + frameCount + " 帧视频, "
@@ -419,14 +482,17 @@ public class DlnaStreamer {
                         Log.i(TAG, "编码器输出格式: " + encoder.getOutputFormat());
                     }
 
-                    // 兜底：超过 2 个帧间隔没有新帧，说明屏幕静止、编码器停帧。
+                    // 兜底：连续多个帧间隔都没有新帧，说明屏幕静止、编码器停帧。
                     // 重发上一帧，让 HTTP 流保持增长，接收端不会缓冲耗尽后断开。
                     // （KEY_REPEAT_PREVIOUS_FRAME_AFTER 在部分编码器上不生效，
                     //   所以不能只靠它。）
+                    //
+                    // 注意这里用的是「距上次真正发帧」的时间，真实帧发出后会刷新
+                    // lastSentAt，所以补帧只在真空闲时发生，不会和真实帧叠加。
                     long now = System.currentTimeMillis();
-                    if (lastFrame != null && now - lastFrameAt > 2L * 1000L / FPS) {
+                    if (lastFrame != null && now - lastSentAt >= repeatIntervalMs * 2L) {
                         emitFrame(muxer.pushVideoRaw(lastFrame, lastWasKey), lastWasKey);
-                        lastFrameAt = now;
+                        lastSentAt = now;
                     }
                 } catch (IllegalStateException e) {
                     break;
@@ -451,6 +517,43 @@ public class DlnaStreamer {
             httpServer.markKeyframe();
         }
         httpServer.write(ts);
+    }
+
+    /**
+     * 每秒统计一次真实出网码率。
+     *
+     * 用「已推送给接收端的字节数」而不是「编码产出的字节数」，
+     * 因为两者含义不同：前者是真实带宽占用，后者只是编码器产量。
+     * 接收端拉不动的时候，两者会拉开差距，这个差距就是画面延迟的来源。
+     */
+    private void startStatsThread() {
+        Thread t = new Thread(() -> {
+            long lastBytes = 0;
+            long lastAt = System.currentTimeMillis();
+            while (running.get()) {
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (httpServer == null) {
+                    continue;
+                }
+                long now = System.currentTimeMillis();
+                long bytes = httpServer.servedBytes();
+                long elapsed = now - lastAt;
+                if (elapsed > 0) {
+                    measuredBitrate = (bytes - lastBytes) * 8000L / elapsed;
+                }
+                lastBytes = bytes;
+                lastAt = now;
+
+                // 每秒一条，字段顺序和 getStats() 一致，方便对照
+                Log.i(TAG, "统计 " + getStats());
+            }
+        }, "DlnaStats");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 返回 [宽, 高, dpi]，按当前实际显示方向。 */
