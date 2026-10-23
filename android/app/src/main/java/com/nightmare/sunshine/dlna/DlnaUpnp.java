@@ -95,7 +95,14 @@ public class DlnaUpnp {
             }
         }
 
-        ssdpSearch(timeoutMs, byUdn);
+        // A remembered renderer is already a usable result. Give SSDP a short
+        // chance to refresh it, but do not make reconnects wait the full scan.
+        ssdpSearch(byUdn.isEmpty() ? timeoutMs : Math.min(timeoutMs, 250), byUdn);
+        if (!byUdn.isEmpty()) {
+            result.addAll(byUdn.values());
+            Log.i(TAG, "reuse/discovery completed with " + result.size() + " renderer(s)");
+            return result;
+        }
 
         // 组播没找到设备时，退化为单播扫描本网段
         if (byUdn.isEmpty()) {
