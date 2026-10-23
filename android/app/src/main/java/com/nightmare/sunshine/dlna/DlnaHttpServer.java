@@ -42,6 +42,7 @@ public class DlnaHttpServer {
      */
     private static final int LIVE_PREROLL_KEYFRAMES = 2;
     private static final long LIVE_PREROLL_NANOS = 4_000_000_000L;
+    private static final long LIVE_MAX_PREROLL_NANOS = 4_800_000_000L;
 
     /**
      * 环形缓冲区容量。
@@ -469,6 +470,12 @@ public class DlnaHttpServer {
                     break;
                 }
             }
+        }
+        // A stalled/irregular encoder must not turn the fallback into a
+        // multi-second history replay. Prefer the newest IDR when the chosen
+        // mark is already beyond the latency budget.
+        if (selectedMark != null && now - selectedMark.atNanos > LIVE_MAX_PREROLL_NANOS) {
+            selectedMark = keyframeHistory.peekLast();
         }
         long selected = selectedMark != null ? selectedMark.offset : oldest;
         return selected >= oldest ? selected : alignToPacket(oldest);
