@@ -96,13 +96,16 @@ public class HttpRegression {
             if (!matcher.find() || !matcher.group(1).trim().equals("http://192.168.1.2:49152/device.xml"))
                 throw new AssertionError("SSDP uses HTTP headers, not <LOCATION> XML tags");
         });
-        cases.put("new live client starts at newest retained keyframe", () -> {
+        cases.put("new live client receives a short IDR preroll before live edge", () -> {
             DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
             try {
-                server.markKeyframe(); server.write(packets(100, 1));
-                byte[] latest = packets(3, 77); server.markKeyframe(); server.write(latest);
+                byte[][] frames = new byte[4][];
+                for (int i = 0; i < frames.length; i++) {
+                    frames[i] = packets(3, 70 + i);
+                    server.markKeyframe(); server.write(frames[i]);
+                }
                 try (Socket s = request(server, "")) {
-                    headers(s.getInputStream()); equal(latest, s.getInputStream());
+                    headers(s.getInputStream()); equal(frames[1], s.getInputStream());
                 }
             } finally { server.stop(); }
         });
@@ -122,12 +125,12 @@ public class HttpRegression {
         cases.put("open-ended reconnect is a fresh live stream, not a global byte seek", () -> {
             DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
             try {
-                server.write(packets(50, 1), true);
+                byte[] first = packets(50, 1); server.write(first, true);
                 byte[] latest = packets(3, 88); server.write(latest, true);
                 try (Socket s = request(server, "Range: bytes=188-\r\n")) {
                     String h = headers(s.getInputStream());
                     if (!h.startsWith("HTTP/1.1 200")) throw new AssertionError("live offset is not global: " + h);
-                    equal(latest, s.getInputStream());
+                    equal(first, s.getInputStream());
                 }
             } finally { server.stop(); }
         });

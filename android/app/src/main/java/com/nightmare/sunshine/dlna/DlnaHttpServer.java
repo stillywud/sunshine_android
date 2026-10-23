@@ -35,6 +35,14 @@ public class DlnaHttpServer {
             "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=8D100000000000000000000000000000";
 
     /**
+     * Give a generic renderer a small startup cushion.  The encoder emits an
+     * IDR about every two seconds, so two earlier IDRs provide roughly four
+     * seconds of already available TS while the HTTP socket catches up to the
+     * live edge.  Range requests keep their exact byte semantics.
+     */
+    private static final int LIVE_PREROLL_KEYFRAMES = 2;
+
+    /**
      * 环形缓冲区容量。
      *
      * 这里保存的是「最近的流数据」，供播放器续传时回读。
@@ -337,8 +345,7 @@ public class DlnaHttpServer {
                     alignedFrom = requestedStart;
                     endExclusive = Math.min(requestedEnd, total - 1) + 1;
                 } else {
-                    alignedFrom = !keyframeHistory.isEmpty() ? keyframeHistory.peekLast()
-                            : alignToPacket(oldest);
+                    alignedFrom = chooseLiveStart(total, oldest);
                 }
             }
             Log.i(TAG, "start=" + alignedFrom + " requested=" + requestedStart
@@ -426,6 +433,22 @@ public class DlnaHttpServer {
     private static long alignToPacket(long offset) {
         long rem = offset % TS_PACKET_SIZE;
         return rem == 0 ? offset : offset + (TS_PACKET_SIZE - rem);
+    }
+
+    private long chooseLiveStart(long total, long oldest) {
+        if (keyframeHistory.isEmpty()) {
+            return alignToPacket(oldest);
+        }
+        int targetIndex = Math.max(0, keyframeHistory.size() - 1 - LIVE_PREROLL_KEYFRAMES);
+        int index = 0;
+        long selected = keyframeHistory.peekLast();
+        for (Long offset : keyframeHistory) {
+            if (index++ >= targetIndex) {
+                selected = offset;
+                break;
+            }
+        }
+        return selected >= oldest ? selected : alignToPacket(oldest);
     }
 
     private static String readLine(InputStream in) throws IOException {
