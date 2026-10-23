@@ -55,6 +55,13 @@ public class DlnaStreamer {
     private DlnaUpnp.Renderer target;
     private String mediaUrl;
 
+    /** 音频采集（可选）。null 或未运行时表示纯视频投屏。 */
+    private DlnaAudioCapture audioCapture;
+    /** 音频不可用的原因，供界面提示 */
+    private String audioError;
+    /** 已产出的音频帧数，只用于日志 */
+    private volatile long audioFrameCount;
+
     public DlnaStreamer(Context context) {
         this.context = context.getApplicationContext();
     }
@@ -69,6 +76,20 @@ public class DlnaStreamer {
 
     public String getTargetName() {
         return target != null ? target.name : "";
+    }
+
+    /** 当前是否带音频 */
+    public boolean hasAudio() {
+        return audioCapture != null && audioCapture.isRunning();
+    }
+
+    /** 音频不可用的原因（没有音频时才有意义） */
+    public String getAudioError() {
+        return audioError != null ? audioError : "";
+    }
+
+    private String audioSuffix() {
+        return hasAudio() ? "（含音频）" : "（无音频：" + getAudioError() + "）";
     }
 
     /** 本机在局域网里的 IPv4 地址，用于拼流地址。 */
@@ -145,7 +166,10 @@ public class DlnaStreamer {
             encoder.start();
 
             // 3. TS 封装器 + HTTP 服务
-            muxer = new DlnaTsMuxer(FPS, false);
+            //    hasAudio 先给 false：音频能否采集要等下面尝试过才知道。
+            //    采到之后立刻 setHasAudio(true)，PMT 会跟着重写。
+            int[] size = screenSize();
+            muxer = new DlnaTsMuxer(FPS, false, DlnaAudioCapture.SAMPLE_RATE);
             httpServer = new DlnaHttpServer(MIME_TS);
             int port = httpServer.start(0);
 
@@ -156,25 +180,50 @@ public class DlnaStreamer {
             mediaUrl = "http://" + ip + ":" + port + "/live.ts";
             Log.i(TAG, "流地址: " + mediaUrl);
 
-            // 4. 虚拟显示器，把屏幕内容投到编码器的 Surface
-            int[] size = screenSize();
+            // 4. 必须先注册 MediaProjection 回调，再 createVirtualDisplay。
+            //
+            //    Android 14 起这是硬性要求，否则抛：
+            //      IllegalStateException: Must register a callback before starting
+            //      capture, to manage resources in response to MediaProjection states.
+            //
+            //    回调的作用是让系统在用户主动停止投屏（下拉通知栏点停止）时
+            //    能通知到我们，好把编码器、HTTP 服务一并释放。
+            //
+            //    注意：MediaProjection 的回调必须注册在「有 Looper 的线程」上，
+            //    否则内部 Handler 建不出来，回调等于没注册，后面照样报上面那个错。
+            //    这里调用方是后台线程，所以显式传一个主线程 Handler。
+            android.os.Handler mainHandler =
+                    new android.os.Handler(android.os.Looper.getMainLooper());
+            projection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    Log.i(TAG, "系统要求停止投屏（用户从通知栏停止）");
+                    stop();
+                }
+            }, mainHandler);
+            Log.i(TAG, "MediaProjection 回调已注册");
+
+            // 5. 虚拟显示器，把屏幕内容投到编码器的 Surface
             virtualDisplay = projection.createVirtualDisplay(
                     "sunshine-dlna",
                     size[0], size[1], size[2],
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     inputSurface, null, null);
 
-            // 5. 开始把编码输出喂给 muxer
+            // 6. 开始把编码输出喂给 muxer
             startDraining();
 
-            // 6. 推送 URL 给接收端
+            // 7. 音频轨（可选）。失败不影响视频，只是没声音。
+            startAudio(projection);
+
+            // 8. 推送 URL 给接收端
             boolean pushed = DlnaUpnp.play(renderer, mediaUrl, MIME_TS);
             if (!pushed) {
                 stop();
                 return "推送到「" + renderer.name + "」失败";
             }
 
-            Log.i(TAG, "投屏已启动 -> " + renderer.name);
+            Log.i(TAG, "投屏已启动 -> " + renderer.name + audioSuffix());
             return null;
         } catch (Exception e) {
             Log.e(TAG, "启动失败", e);
@@ -183,8 +232,47 @@ public class DlnaStreamer {
         }
     }
 
+    /**
+     * 启动音频轨。失败只记日志并留下原因，视频照常投。
+     *
+     * 注意用的是 AudioPlaybackCapture（系统播放声音），不是麦克风——
+     * 麦克风会独占硬件且录到的是环境声，投屏场景下完全不对。
+     */
+    private void startAudio(MediaProjection projection) {
+        audioError = null;
+        DlnaAudioCapture capture = new DlnaAudioCapture();
+        String error = capture.start(projection, (data, codecConfig) -> {
+            byte[] ts = muxer.pushAudioRaw(data, codecConfig);
+            if (ts != null) {
+                httpServer.write(ts);
+            }
+            if (!codecConfig) {
+                audioFrameCount++;
+            }
+        });
+
+        if (error != null) {
+            audioError = error;
+            Log.w(TAG, "音频不可用: " + error);
+            return;
+        }
+
+        audioCapture = capture;
+        // 让 PMT 声明音频流（必须在有音频帧之前）
+        muxer.setHasAudio(true);
+        Log.i(TAG, "音频轨已启用");
+    }
+
     public void stop() {
         running.set(false);
+
+        try {
+            if (audioCapture != null) {
+                audioCapture.stop();
+            }
+        } catch (Exception ignored) {
+        }
+        audioCapture = null;
 
         try {
             if (target != null) {
@@ -320,7 +408,8 @@ public class DlnaStreamer {
                                 long now = lastFrameAt;
                                 if (now - lastLog > 5000) {
                                     lastLog = now;
-                                    Log.i(TAG, "已编码 " + frameCount + " 帧, 流总长 "
+                                    Log.i(TAG, "已编码 " + frameCount + " 帧视频, "
+                                            + audioFrameCount + " 帧音频, 流总长 "
                                             + httpServer.streamLength() + " 字节");
                                 }
                             }

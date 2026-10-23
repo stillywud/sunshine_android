@@ -226,6 +226,10 @@ class _StopwatchPageState extends State<StopwatchPage> {
   bool _dlnaRunning = false;
   bool _dlnaScanning = false;
   String _dlnaTarget = '';
+  // 音频轨状态：投屏中才有意义
+  bool _dlnaHasAudio = false;
+  // 没有音频时的原因（例如系统版本太低）
+  String _dlnaAudioError = '';
   List<Map<String, dynamic>> _dlnaDevices = [];
 
   // 格式化时间显示
@@ -302,14 +306,24 @@ class _StopwatchPageState extends State<StopwatchPage> {
     // DLNA 投屏状态同步（授权回来之后是异步启动的，靠轮询感知）
     channel.invokeMethod('dlnaStatus').then((value) {
       if (value is String && mounted) {
+        // 格式：运行中|接收端名|流地址|音频状态
         final parts = value.split('|');
-        if (parts.length >= 3) {
+        if (parts.length >= 4) {
           final bool running = parts[0] == '1';
           final String target = parts[1];
-          if (running != _dlnaRunning || target != _dlnaTarget) {
+          final String audio = parts[3];
+          final bool hasAudio = audio == 'a';
+          final String audioError =
+              audio.startsWith('e:') ? audio.substring(2) : '';
+          if (running != _dlnaRunning ||
+              target != _dlnaTarget ||
+              hasAudio != _dlnaHasAudio ||
+              audioError != _dlnaAudioError) {
             setState(() {
               _dlnaRunning = running;
               _dlnaTarget = target;
+              _dlnaHasAudio = hasAudio;
+              _dlnaAudioError = audioError;
             });
           }
         }
@@ -643,6 +657,27 @@ class _StopwatchPageState extends State<StopwatchPage> {
                   ),
                 ],
               ),
+              // 音频轨状态：只在投屏中显示。没有音频时把原因讲清楚，
+              // 免得用户以为是投屏坏了。最常见的原因是系统版本 < Android 10。
+              if (_dlnaRunning && !_dlnaHasAudio && _dlnaAudioError.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.volume_off,
+                          size: 15, color: Color(0xFFE65100)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          '无声音：$_dlnaAudioError',
+                          style: const TextStyle(
+                              fontSize: 12, color: Color(0xFFE65100)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               SizedBox(height: 8),
               if (_dlnaDevices.isNotEmpty && !_dlnaRunning)
                 Container(

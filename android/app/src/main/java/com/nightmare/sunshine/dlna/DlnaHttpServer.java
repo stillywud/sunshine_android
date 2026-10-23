@@ -113,14 +113,40 @@ public class DlnaHttpServer {
     }
 
     /**
-     * 找出「不早于 target 的最近关键帧位置」。
+     * 找出离 target 最近的关键帧位置，优先取「不晚于 target」的那个。
      *
-     * 播放器续传必须从关键帧开始，否则解不出画面。
-     * 但如果目标位置附近没有更晚的关键帧（说明它请求的是很久以前的数据），
-     * 绝不能回退到 0 —— 那会让播放器收到"比它期望的偏移更早"的数据，
-     * 直接判为非法并断开（实测报"播放失败 -2"）。
-     * 这时返回 target 本身，让它从期望位置继续。
+     * 播放器续传必须从关键帧开始，否则解不出画面；但落点离它请求的位置
+     * 太远都不行，两个方向都实测出过问题：
+     *
+     *   倒退太远 → 它收到比期望更早的数据，判非法直接断开（"播放失败 -2"）
+     *   前进太多 → 中间一段数据被跳过，时间戳断层，播放器认为流已结束，
+     *              直接 onCompletion 退出播放（实测跳过 31KB 就触发）
+     *
+     * 所以策略是：取 <= target 的最后一个关键帧；一个都没有时才退而取
+     * 第一个 > target 的；实在没有就返回 target 本身。
      */
+    private long nearestKeyframe(long target) {
+        synchronized (lock) {
+            Long before = null;
+            Long after = null;
+            for (Long k : keyframeHistory) {
+                if (k <= target) {
+                    before = k;
+                } else if (after == null) {
+                    after = k;
+                }
+            }
+            if (before != null) {
+                return before;
+            }
+            if (after != null) {
+                return after;
+            }
+            return target;
+        }
+    }
+
+    /** 找出「不早于 target 的第一个关键帧」，用于落后追赶。 */
     private long keyframeAtOrAfter(long target) {
         synchronized (lock) {
             for (Long k : keyframeHistory) {
@@ -128,7 +154,6 @@ public class DlnaHttpServer {
                     return k;
                 }
             }
-            // 没有更晚的关键帧：用请求位置本身（不要倒退到 0）
             return target;
         }
     }
@@ -257,8 +282,10 @@ public class DlnaHttpServer {
                 total = streamLength();
             }
 
-            // 续传点必须对齐到关键帧，否则播放器解不出画面
-            long alignedFrom = keyframeAtOrAfter(startFrom);
+            // 续传点必须对齐到关键帧，否则播放器解不出画面。
+            // 用「最近的」而不是「不早于」：往后跳太远会让播放器
+            // 丢掉中间一段，认为流结束直接退出播放（见 nearestKeyframe 注释）。
+            long alignedFrom = nearestKeyframe(startFrom);
             if (alignedFrom < 0 || alignedFrom > total) {
                 alignedFrom = startFrom;
             }
@@ -335,7 +362,7 @@ public class DlnaHttpServer {
                     continue;
                 }
                 // 播放器落后太多时跳到最新的关键帧（不能跳到任意位置，
-                // 否则解不出画面）
+                // 否则解不出画面）。这里和续传不同，明确要「向前」追最新。
                 if (available > RING_CAPACITY * 0.6) {
                     long skipTo = keyframeAtOrAfter(totalWritten - RING_CAPACITY / 3);
                     if (skipTo < 0) {

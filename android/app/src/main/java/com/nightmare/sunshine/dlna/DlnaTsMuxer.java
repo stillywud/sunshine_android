@@ -37,6 +37,20 @@ public class DlnaTsMuxer {
     private static final int STREAM_TYPE_H264 = 0x1B;
     private static final int STREAM_TYPE_AAC = 0x0F;
 
+    /** AAC 一帧固定 1024 个采样点，音频 PTS 按它递增 */
+    private static final int AAC_SAMPLES_PER_FRAME = 1024;
+    /** ADTS 头（无 CRC）固定 7 字节 */
+    private static final int ADTS_HEADER_SIZE = 7;
+    /** AAC LC 在 ADTS profile 字段里的取值是 1（字段值 = profile+1） */
+    private static final int ADTS_PROFILE_AAC_LC = 1;
+    /** 声道数，和 DlnaAudioCapture 保持一致 */
+    private static final int CHANNEL_COUNT = 2;
+    /** 采样率索引表，ADTS 头里用 4 bit 编码 */
+    private static final int[] AAC_SAMPLE_RATES = {
+            96000, 88200, 64000, 48000, 44100, 32000, 24000,
+            22050, 16000, 12000, 11025, 8000, 7350
+    };
+
     private static final int TS_HEADER_SIZE = 4;
     private static final int PAYLOAD_CAPACITY = TS_PACKET_SIZE - TS_HEADER_SIZE;
 
@@ -47,7 +61,13 @@ public class DlnaTsMuxer {
     private static final long PTS_START_US = 1_000_000L;
 
     private final int fps;
-    private final boolean hasAudio;
+    /**
+     * 是否有音频轨。
+     *
+     * 不能用 final：音频能不能采到取决于系统版本和权限，
+     * 要等 DlnaAudioCapture.start() 跑完才知道，之后再 setHasAudio() 修正。
+     */
+    private volatile boolean hasAudioField;
 
     private final ByteArrayOutputStream out = new ByteArrayOutputStream(256 * 1024);
 
@@ -60,11 +80,20 @@ public class DlnaTsMuxer {
     private long audioPtsUs;
     /** 已产出的视频帧数，用来生成严格单调递增的 PTS */
     private long videoFrameIndex;
+    /** 已产出的音频帧数，同样用来推导 PTS */
+    private long audioFrameIndex;
+    /** 音频采样率，ADTS 头需要；未启用音频时为 0 */
+    private int audioSampleRate;
     private boolean patPmtWritten;
 
     public DlnaTsMuxer(int fps, boolean hasAudio) {
+        this(fps, hasAudio, 48_000);
+    }
+
+    public DlnaTsMuxer(int fps, boolean hasAudio, int audioSampleRate) {
         this.fps = Math.max(1, fps);
-        this.hasAudio = hasAudio;
+        this.hasAudioField = hasAudio;
+        this.audioSampleRate = audioSampleRate > 0 ? audioSampleRate : 48_000;
     }
 
     /**
@@ -78,6 +107,17 @@ public class DlnaTsMuxer {
 
     public void setAudioCodecConfig(byte[] csd) {
         this.audioConfig = csd;
+        this.patPmtWritten = false;
+    }
+
+    /**
+     * 声明是否有音频轨。
+     *
+     * 音频能不能采到要启动之后才知道，所以不能在构造时就定死。
+     * 调用后强制重写 PAT/PMT，让接收端拿到正确的流组成。
+     */
+    public void setHasAudio(boolean value) {
+        this.hasAudioField = value;
         this.patPmtWritten = false;
     }
 
@@ -140,26 +180,73 @@ public class DlnaTsMuxer {
     }
 
     /**
-     * 追加一帧音频。没有音频轨时不会被调用。
+     * 追加一帧音频（AAC 裸帧）。没有音频轨时不会被调用。
+     *
+     * 这里要自己加 ADTS 头：MediaCodec 输出的是裸 AAC 帧，
+     * 而 TS 里虽然理论上可以只靠 AudioSpecificConfig 解，
+     * 但不少 DLNA 接收端解析 AAC 时依赖 ADTS 的帧边界和采样率字段。
+     * 加上 7 字节头兼容性最好，代价可以忽略。
      */
-    public synchronized byte[] pushAudio(ByteBuffer buffer, MediaCodec.BufferInfo info) {
-        byte[] data = readBuffer(buffer, info);
-        if (data == null || data.length == 0) {
+    public synchronized byte[] pushAudioRaw(byte[] aacFrame, boolean codecConfig) {
+        if (aacFrame == null || aacFrame.length == 0) {
             return null;
         }
 
-        boolean keyFrame = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
-        if (keyFrame) {
-            audioConfig = data;
+        if (codecConfig) {
+            audioConfig = aacFrame;
+            patPmtWritten = false;
+            Log.i(TAG, "收到 AAC AudioSpecificConfig, " + aacFrame.length + " 字节");
             return null;
         }
 
-        audioPtsUs = info.presentationTimeUs > 0 ? info.presentationTimeUs
-                : audioPtsUs + 23_220L; // 约 1024 samples @44.1kHz
+        // 音频 PTS 同样不能透传编码器时间戳。AAC 每帧固定 1024 个采样点，
+        // 按帧数推导天然单调递增，也天然与真实播放速度一致。
+        audioPtsUs = PTS_START_US + audioFrameIndex * (1_000_000L * AAC_SAMPLES_PER_FRAME
+                / audioSampleRate);
+        audioFrameIndex++;
 
         writePatPmtIfNeeded();
-        writePes(PID_AUDIO, data, audioPtsUs, false);
+
+        byte[] adts = addAdtsHeader(aacFrame);
+        writePes(PID_AUDIO, adts, audioPtsUs, false);
         return take();
+    }
+
+    /** 给裸 AAC 帧加 7 字节 ADTS 头（无 CRC）。 */
+    private byte[] addAdtsHeader(byte[] aac) {
+        int frameLen = aac.length + ADTS_HEADER_SIZE;
+        byte[] out = new byte[frameLen];
+
+        int freqIdx = 3; // 默认 48000
+        for (int i = 0; i < AAC_SAMPLE_RATES.length; i++) {
+            if (AAC_SAMPLE_RATES[i] == audioSampleRate) {
+                freqIdx = i;
+                break;
+            }
+        }
+
+        // ADTS 头的字段是按 bit 拼的，这里逐字节写清楚，别省：
+        //   [0]     syncword 高 8 位
+        //   [1]     syncword 低 4 位 | ID=0(MPEG-4) | layer=00 | protection_absent=1
+        //   [2]     profile(2) | sampling_frequency_index(4) | private(1) | 声道高位(1)
+        //   [3]     声道低 2 位 | 4 个标志位 | aac_frame_length 高 2 位
+        //   [4]     aac_frame_length 中 8 位
+        //   [5]     aac_frame_length 低 3 位 | buffer_fullness 高 5 位
+        //   [6]     buffer_fullness 低 6 位 | raw_data_blocks-1
+        out[0] = (byte) 0xFF;
+        out[1] = (byte) 0xF1;
+        out[2] = (byte) ((ADTS_PROFILE_AAC_LC << 6)
+                | (freqIdx << 2)
+                | ((CHANNEL_COUNT >> 2) & 0x01));
+        out[3] = (byte) (((CHANNEL_COUNT & 0x03) << 6)
+                | ((frameLen >> 11) & 0x03));
+        out[4] = (byte) ((frameLen >> 3) & 0xFF);
+        // buffer_fullness 填 0x7FF 表示 VBR（码率不固定），这是 AAC 实时流的标准做法
+        out[5] = (byte) (((frameLen & 0x07) << 5) | 0x1F);
+        out[6] = (byte) 0xFC;
+
+        System.arraycopy(aac, 0, out, ADTS_HEADER_SIZE, aac.length);
+        return out;
     }
 
     /** 取出并清空累积的字节 */
@@ -183,7 +270,7 @@ public class DlnaTsMuxer {
         writePat();
         writePmt();
         patPmtWritten = true;
-        Log.i(TAG, "PAT/PMT 已写入, audio=" + hasAudio);
+        Log.i(TAG, "PAT/PMT 已写入, audio=" + hasAudioField);
     }
 
     private void writePat() {
@@ -232,7 +319,7 @@ public class DlnaTsMuxer {
         sec.write(0xF0); sec.write(0x00); // ES_info_length = 0
 
         // 音频流
-        if (hasAudio) {
+        if (hasAudioField) {
             sec.write(STREAM_TYPE_AAC);
             sec.write(0xE0 | ((PID_AUDIO >> 8) & 0x1F));
             sec.write(PID_AUDIO & 0xFF);
@@ -293,8 +380,15 @@ public class DlnaTsMuxer {
         pes.write(0x00); pes.write(0x00); pes.write(0x01);
         pes.write(video ? 0xE0 : 0xC0);   // stream_id
 
-        // PES_packet_length：视频允许 0（表示不定长），音频要真实长度
-        int pesLen = payload.length + 8 + 5; // flags(3) + PTS(5) + payload
+        // PES_packet_length 的定义：从本字段之后到 PES 包结尾的字节数。
+        // 这之后是 flags 3 字节 + PTS 5 字节 + payload，所以是 payload + 8。
+        //
+        // 这里曾经写成 payload + 8 + 5，多算了 5 字节，导致每个音频 PES 都
+        // 声明得比实际长。ffmpeg 解析时报 "PES packet size mismatch"、
+        // "Packet corrupt (stream = 1)"，接收端表现为有画面但没声音。
+        //
+        // 视频允许填 0（表示长度不定，由 TS 包边界决定），音频必须给真实值。
+        int pesLen = payload.length + 8;
         if (video) {
             pes.write(0x00); pes.write(0x00);
         } else {
