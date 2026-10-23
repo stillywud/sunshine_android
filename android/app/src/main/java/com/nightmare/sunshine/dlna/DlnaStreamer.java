@@ -189,6 +189,12 @@ public class DlnaStreamer {
             // receivers are not forced to decode >2x the configured budget.
             format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, (float) FPS);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);
+            // Request the codec's lowest supported pipeline latency. Hardware
+            // encoders may otherwise retain several input frames even though
+            // the transport is already live and paced.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                format.setInteger(MediaFormat.KEY_LATENCY, 0);
+            }
 
             // 屏幕内容静止时，Surface 上没有新帧，编码器就彻底停止出帧。
             // 此时 HTTP 流不再增长，接收端缓冲耗尽后报 "handleError: -2" 断开
