@@ -41,6 +41,7 @@ public class DlnaHttpServer {
      * live edge.  Range requests keep their exact byte semantics.
      */
     private static final int LIVE_PREROLL_KEYFRAMES = 2;
+    private static final long LIVE_PREROLL_NANOS = 4_000_000_000L;
 
     /**
      * 环形缓冲区容量。
@@ -138,13 +139,23 @@ public class DlnaHttpServer {
     private volatile long lastKeyframeOffset = -1;
 
     /** 最近若干关键帧的位置，供跳转时找对齐点 */
-    private final java.util.ArrayDeque<Long> keyframeHistory = new java.util.ArrayDeque<>();
+    private static final class KeyframeMark {
+        final long offset;
+        final long atNanos;
+
+        KeyframeMark(long offset, long atNanos) {
+            this.offset = offset;
+            this.atNanos = atNanos;
+        }
+    }
+
+    private final java.util.ArrayDeque<KeyframeMark> keyframeHistory = new java.util.ArrayDeque<>();
 
     /** 编码器产出一个带 PAT/PMT + SPS/PPS 的关键帧时，记录它的起始位置。 */
     public void markKeyframe() {
         synchronized (lock) {
             lastKeyframeOffset = totalWritten;
-            keyframeHistory.addLast(totalWritten);
+            keyframeHistory.addLast(new KeyframeMark(totalWritten, System.nanoTime()));
             // 只保留最近 32 个，够覆盖环形缓冲
             while (keyframeHistory.size() > 32) {
                 keyframeHistory.removeFirst();
@@ -181,7 +192,7 @@ public class DlnaHttpServer {
                 offset += n;
             }
             long oldest = Math.max(0, totalWritten - RING_CAPACITY);
-            while (!keyframeHistory.isEmpty() && keyframeHistory.peekFirst() < oldest) {
+            while (!keyframeHistory.isEmpty() && keyframeHistory.peekFirst().offset < oldest) {
                 keyframeHistory.removeFirst();
             }
             lock.notifyAll();
@@ -439,15 +450,27 @@ public class DlnaHttpServer {
         if (keyframeHistory.isEmpty()) {
             return alignToPacket(oldest);
         }
-        int targetIndex = Math.max(0, keyframeHistory.size() - 1 - LIVE_PREROLL_KEYFRAMES);
-        int index = 0;
-        long selected = keyframeHistory.peekLast();
-        for (Long offset : keyframeHistory) {
-            if (index++ >= targetIndex) {
-                selected = offset;
+        long now = System.nanoTime();
+        long targetNanos = now - LIVE_PREROLL_NANOS;
+        KeyframeMark selectedMark = null;
+        for (KeyframeMark mark : keyframeHistory) {
+            if (mark.atNanos <= targetNanos) {
+                selectedMark = mark;
+            } else {
                 break;
             }
         }
+        if (selectedMark == null) {
+            int targetIndex = Math.max(0, keyframeHistory.size() - 1 - LIVE_PREROLL_KEYFRAMES);
+            int index = 0;
+            for (KeyframeMark mark : keyframeHistory) {
+                if (index++ >= targetIndex) {
+                    selectedMark = mark;
+                    break;
+                }
+            }
+        }
+        long selected = selectedMark != null ? selectedMark.offset : oldest;
         return selected >= oldest ? selected : alignToPacket(oldest);
     }
 
