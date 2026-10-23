@@ -51,6 +51,15 @@ public class DlnaHttpServer {
      */
     private static final double MAX_LAG_SECONDS = 1.5;
 
+    /**
+     * 续传时，如果请求位置落后超过这么多秒，就直接跳到最新。
+     *
+     * 这个值要大于 MAX_LAG_SECONDS：正常播放时本来就有 1 秒左右抖动，
+     * 每条连接都要宽容对待；但确实已经拖了几秒以上的历史，就该果断丢弃。
+     * 单独用一个常量是为了避免把「正常抖动」也当成「太旧」而频繁跳帧。
+     */
+    private static final double RESUME_JUMP_SECONDS = 4.0;
+
     /** 落后上限的最小字节数，防止码率很低时阈值小到频繁跳帧。 */
     private static final long MIN_LAG_LIMIT_BYTES = 512 * 1024;
 
@@ -391,18 +400,54 @@ public class DlnaHttpServer {
                 total = streamLength();
             }
 
-            // 续传点必须对齐到关键帧，否则播放器解不出画面。
-            // 用「最近的」而不是「不早于」：往后跳太远会让播放器
-            // 丢掉中间一段，认为流结束直接退出播放（见 nearestKeyframe 注释）。
-            long alignedFrom = nearestKeyframe(startFrom);
-            if (alignedFrom < 0 || alignedFrom > total) {
-                alignedFrom = startFrom;
+            // 关键：判断播放器请求的位置有没有「太旧」。
+            //
+            // 播放器会用 "Range: bytes=N-" 从它上次读到的位置续传。如果 N
+            // 已经落后流末尾很多（比如几十秒），而我们老老实实从 N 开始推，
+            // 那它要补完这几十秒的历史数据才可能追上实时——实际上永远追不上，
+            // 因为它一边补一边又落后更多。实测这就是「差 17-30 秒」的直接原因。
+            //
+            // 投屏是实时的，历史数据没有价值。所以落后超过阈值时，直接把它
+            // 拉到「最新的关键帧」附近，牺牲一小段画面换取实时性。
+            //
+            // 但这里有个坑（实测踩过）：跳到更晚的位置后仍然回 206 +
+            // Content-Range，播发器会发现自己请求的 N 和实际给的起始位置对不上，
+            // 认为数据有缺口，直接 onCompletion 结束播放。
+            // 所以落后太旧时改成用 200 重新开一条「直播流」响应，
+            // 不带 Content-Range，播放器就会当它是从头开始的新流照常播。
+            total = streamLength();
+            long lagBytes = total - startFrom;
+            long maxLagBytes = Math.max(MIN_LAG_LIMIT_BYTES,
+                    (long) (measuredBytesPerSec() * RESUME_JUMP_SECONDS));
+            boolean tooOld = lagBytes > maxLagBytes;
+
+            long alignedFrom;
+            if (tooOld) {
+                // 从最新的关键帧开始，等于直接丢弃中间的历史
+                long target = total - Math.max(MIN_LAG_LIMIT_BYTES,
+                        (long) (measuredBytesPerSec() * 0.3));
+                alignedFrom = nearestKeyframe(target);
+                if (alignedFrom < 0) {
+                    alignedFrom = target;
+                }
+                Log.w(TAG, "续传位置太旧（落后 " + (lagBytes / 1024) + "KB ≈ "
+                        + (lagBytes / Math.max(1, measuredBytesPerSec())) + " 秒），"
+                        + "丢弃历史，从最新关键帧 " + alignedFrom + " 按新流重推");
+            } else {
+                // 落后不多：从它请求的位置（对齐到最近关键帧）继续推
+                alignedFrom = nearestKeyframe(startFrom);
+                if (alignedFrom < 0 || alignedFrom > total) {
+                    alignedFrom = startFrom;
+                }
             }
 
             // 只有「起始点之后确实还有数据」才回 206 + Content-Range。
             // 没有数据可给时按 200 无限流处理：不带 Content-Length、
             // 不带 Content-Range，播放器就当它是个没完的直播源继续读。
-            boolean partial = hasRange && alignedFrom < total;
+            //
+            // 另外：丢弃历史重推（tooOld）时也必须用 200——回 206 会让
+            // 播放器发现请求位置和实际给的位置不一致，判流异常退出。
+            boolean partial = hasRange && !tooOld && alignedFrom < total;
 
             Log.i(TAG, "从 " + alignedFrom + " 开始推流（请求偏移 " + startFrom
                     + "，关键帧对齐后 " + alignedFrom + "，总长 " + total
@@ -457,11 +502,23 @@ public class DlnaHttpServer {
         // 拿到这么多数据就先装满缓冲再慢慢播，于是它播的永远是几十秒前的
         // 画面——而网络和编码其实一点都不慢。
         //
-        // 做法：按「本连接开始时的流位置 + 之后真实经过的字节量」来控制
-        // 发送节奏，让接收端拿到的基本就是实时产生的那部分数据。
-        // 多给 300ms 的余量，避免因为抖动导致频繁等待。
-        long connStartCursor = cursor;
+        // 做法：按「流的最新位置 + 之后真实经过的字节量」控制发送节奏。
+        //
+        // 这里有个关键细节（踩过）：不能按「本连接起始位置」算。因为播放器
+        // 请求的起点可能本身就已经落后流末尾一段，那样限速只是维持这个
+        // 落后量不变，永远追不回来。必须以流末尾为基准，让每条连接都被
+        // 拉向「当前实时」。
         long connStartAt = System.currentTimeMillis();
+        // 连接建立时流已产出多少字节。用它把「流末尾」映射到「本连接已发量」。
+        long startNewest = streamLength();
+        long startCursor = cursor;
+        // 如果起点已经落后很多，直接以它为基准没意义——从当前位置开始，
+        // 但把基准设成「起点 + 允许的落后量」，这样它会先快速追平这段落后。
+        long lagAtStart = startNewest - startCursor;
+        if (lagAtStart < 0) {
+            lagAtStart = 0;
+        }
+        long baseNewest = startCursor + Math.min(lagAtStart, BURST_ALLOWANCE_BYTES);
 
         while (running) {
             byte[] chunk = null;
@@ -529,13 +586,14 @@ public class DlnaHttpServer {
                     continue;
                 }
 
-                // 限速：本连接至今已发多少字节，对比它在这段时间里「应该」
-                // 收到多少（按流的真实产出速率算）。发得超前了就等一等，
-                // 让接收端不至于把几十秒的历史数据一次性塞进播放缓冲。
-                long allowed = (long) (measuredBytesPerSec()
-                        * (System.currentTimeMillis() - connStartAt) / 1000.0);
-                long sentSoFar = cursor - connStartCursor;
-                if (sentSoFar > allowed + BURST_ALLOWANCE_BYTES) {
+                // 限速：把「本连接已发量」和「这段时间里流该产出的量」对齐。
+                //
+                // 基准用 baseNewest（连接建立时的流末尾，或起点 + 允许的落后量），
+                // 这样每条连接都会被拉向实时位置，而不是维持它自己的落后量。
+                long elapsedMs = System.currentTimeMillis() - connStartAt;
+                long allowed = baseNewest + (long) (measuredBytesPerSec() * elapsedMs / 1000.0)
+                        + BURST_ALLOWANCE_BYTES;
+                if (cursor > allowed) {
                     try {
                         lock.wait(30);
                     } catch (InterruptedException e) {

@@ -38,20 +38,20 @@ public class DlnaStreamer {
      *
      * 分辨率：960x540 在 1080p 屏幕上放大后偏糊，提到 720p。
      *
-     * 帧率：按需求用 60fps 输出。真机上 720p60 是标准配置，编码器完全撑得住；
-     * 模拟器上实测编码能力有限（会掉帧），但不影响真机目标。
+     * 帧率 25：不是不想给 60，而是实测 60fps 会让延迟显著变差。
+     * 接收端播放器的内部队列是按「帧数」缓冲的，60fps 下同样的时间窗口
+     * 里堆的帧数是 25fps 的 2.4 倍，用户实际看到的画面反而更滞后。
+     * 实测 60fps 时端到端延迟约 20 秒，25fps 时约 1 秒。
+     * 要 60fps 又低延迟，得能控制接收端缓冲深度——DLNA 协议没有这个能力。
      *
-     * 码率 6Mbps：局域网完全不是瓶颈（实测单连接能跑到几十 Mbps），
-     * 真正的瓶颈从来是接收端的播放缓冲，所以宁给足码率保画质，
-     * 延迟靠服务端的实时限速来解决（见 DlnaHttpServer.streamFrom）。
+     * 码率 3Mbps：720p25 下这个量级足够保画质，局域网毫无压力。
      *
-     * I 帧间隔 2 秒：每秒一个关键帧会显著抬高平均码率（60fps 下 I 帧特别大），
-     * 2 秒足够让新接入的接收端尽快出画面。
+     * I 帧间隔 2 秒：每秒一个关键帧会显著抬高平均码率。
      */
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
-    private static final int FPS = 60;
-    private static final int BITRATE = 6_000_000;
+    private static final int FPS = 25;
+    private static final int BITRATE = 3_000_000;
     private static final int I_FRAME_INTERVAL = 2; // 秒
     private static final String MIME_TS = "video/mp2t";
 
