@@ -78,7 +78,22 @@ public class DlnaUpnp {
 
         // 最快路径：先用上次成功过的地址试试（接收端 App 常换端口，
         // 但如果没换就能秒出结果）
-        rememberedRenderer = null;
+        // Reuse the last successful renderer first. Its port may change after
+        // a receiver restart, so normal SSDP/subnet discovery still follows.
+        Renderer remembered = rememberedRenderer;
+        if (remembered != null && remembered.location != null
+                && !remembered.location.isEmpty()) {
+            try {
+                if (enrich(remembered)) {
+                    String key = (remembered.udn == null || remembered.udn.isEmpty())
+                            ? remembered.location : remembered.udn;
+                    byUdn.put(key, remembered);
+                    Log.i(TAG, "reuse renderer " + remembered.location);
+                }
+            } catch (Exception ignored) {
+                // Fall through to SSDP and subnet discovery.
+            }
+        }
 
         ssdpSearch(timeoutMs, byUdn);
 
@@ -176,7 +191,7 @@ public class DlnaUpnp {
 
         // 第一步：全网段快速探活，找出哪些主机在跑 DLNA 类服务。
         // 端口选各家投屏 App 的典型监听口，命中概率高且数量少。
-        int[] probePorts = {1474, 1086, 8080, 8081, 8888, 9090, 1900, 49152, 49153, 55556};
+        int[] probePorts = {1474, 1478, 1086, 8080, 8081, 8888, 9090, 1900, 49152, 49153, 55556};
         // 第二步：对探活成功的主机做端口区间扫描。
         // 实测「光元素投屏」每次启动会在这个范围里随机选端口
         // （见过 1086 / 1326 / 1474 / 55556），所以必须扫区间。
