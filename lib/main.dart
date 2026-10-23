@@ -222,6 +222,11 @@ class _StopwatchPageState extends State<StopwatchPage> {
   int _clientCount = 0;
   // 状态轮询定时器
   Timer? _statusTimer;
+  // DLNA 投屏状态
+  bool _dlnaRunning = false;
+  bool _dlnaScanning = false;
+  String _dlnaTarget = '';
+  List<Map<String, dynamic>> _dlnaDevices = [];
 
   // 格式化时间显示
   String _formatTime(int milliseconds) {
@@ -288,6 +293,23 @@ class _StopwatchPageState extends State<StopwatchPage> {
             setState(() {
               _serverRunning = running;
               _clientCount = clients;
+            });
+          }
+        }
+      }
+    });
+
+    // DLNA 投屏状态同步（授权回来之后是异步启动的，靠轮询感知）
+    channel.invokeMethod('dlnaStatus').then((value) {
+      if (value is String && mounted) {
+        final parts = value.split('|');
+        if (parts.length >= 3) {
+          final bool running = parts[0] == '1';
+          final String target = parts[1];
+          if (running != _dlnaRunning || target != _dlnaTarget) {
+            setState(() {
+              _dlnaRunning = running;
+              _dlnaTarget = target;
             });
           }
         }
@@ -592,6 +614,141 @@ class _StopwatchPageState extends State<StopwatchPage> {
                       ],
                     ),
                   ),
+                ],
+              ),
+              SizedBox(height: 20),
+              // ---------------- DLNA 投屏 ----------------
+              // 和上面的 Moonlight 串流是两条独立链路：
+              // 串流走 RTP 给 Moonlight 客户端；投屏把屏幕编成 TS 流，
+              // 通过 UPnP 推给电视/投屏盒，接收端不需要装任何 App。
+              Row(
+                children: [
+                  const Text('DLNA 投屏：',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _dlnaRunning
+                          ? '正在投屏到「$_dlnaTarget」'
+                          : (_dlnaDevices.isEmpty
+                              ? '未搜索设备'
+                              : '找到 ${_dlnaDevices.length} 个设备'),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: _dlnaRunning
+                            ? const Color(0xFF2E7D32)
+                            : const Color(0xFF616161),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 8),
+              if (_dlnaDevices.isNotEmpty && !_dlnaRunning)
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: const Color(0xFFBDBDBD)),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    children: [
+                      for (int i = 0; i < _dlnaDevices.length; i++)
+                        InkWell(
+                          onTap: () {
+                            channel.invokeMethod('dlnaStart', i);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              border: i < _dlnaDevices.length - 1
+                                  ? const Border(
+                                      bottom: BorderSide(
+                                          color: Color(0xFFE0E0E0)))
+                                  : null,
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.tv, size: 18),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _dlnaDevices[i]['name'] as String? ?? '未知设备',
+                                    style: const TextStyle(fontSize: 14),
+                                  ),
+                                ),
+                                const Icon(Icons.play_arrow,
+                                    size: 18, color: Color(0xFF2E7D32)),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              SizedBox(height: 8),
+              Row(
+                spacing: 12,
+                children: [
+                  TextButton.icon(
+                    onPressed: _dlnaScanning
+                        ? null
+                        : () {
+                            setState(() {
+                              _dlnaScanning = true;
+                              _dlnaDevices = [];
+                            });
+                            channel.invokeMethod('dlnaDiscover').then((value) {
+                              if (!mounted) return;
+                              final list = <Map<String, dynamic>>[];
+                              if (value is List) {
+                                for (final item in value) {
+                                  if (item is Map) {
+                                    list.add(Map<String, dynamic>.from(item));
+                                  }
+                                }
+                              }
+                              setState(() {
+                                _dlnaDevices = list;
+                                _dlnaScanning = false;
+                              });
+                            }).catchError((_) {
+                              if (mounted) {
+                                setState(() => _dlnaScanning = false);
+                              }
+                            });
+                          },
+                    style: TextButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                    ),
+                    icon: Icon(
+                      _dlnaScanning ? Icons.hourglass_empty : Icons.search,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                    label: Text(
+                      _dlnaScanning ? '搜索中…' : '搜索设备',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onPrimary,
+                      ),
+                    ),
+                  ),
+                  if (_dlnaRunning)
+                    TextButton.icon(
+                      onPressed: () {
+                        channel.invokeMethod('dlnaStop');
+                        setState(() {
+                          _dlnaRunning = false;
+                          _dlnaTarget = '';
+                        });
+                      },
+                      style: TextButton.styleFrom(
+                        backgroundColor: const Color(0xFFD32F2F),
+                      ),
+                      icon: const Icon(Icons.stop, size: 18, color: Colors.white),
+                      label: const Text('停止投屏',
+                          style: TextStyle(color: Colors.white)),
+                    ),
                 ],
               ),
               SizedBox(height: 24),

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DLNA/UPnP 的通信全是明文 HTTP：设备描述、SOAP 控制指令、TS 流本身。
+  Android 9+ 默认禁止明文流量，所以这里必须整体放行，否则设备发现
+  会直接报 "Cleartext HTTP traffic not permitted"。
+
+  说明：network-security-config 不支持按 CIDR 网段放行（只能按域名/主机名），
+  而 DLNA 设备地址是局域网内的任意 IP，没法逐个列举，所以只能全局放开。
+  本应用的网络行为仅限局域网投屏，这个取舍是可接受的。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

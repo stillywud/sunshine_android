@@ -10,7 +10,9 @@
     <application
         android:label="sunshine_android"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name="com.nightmare.sunshine.MainActivity"
             android:exported="true"

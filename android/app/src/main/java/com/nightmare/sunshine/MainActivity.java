@@ -19,14 +19,31 @@ import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 
+import com.nightmare.sunshine.dlna.DlnaStreamer;
+import com.nightmare.sunshine.dlna.DlnaUpnp;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 
 public class MainActivity extends FlutterActivity {
     private static final int REQUEST_CODE = 1000;
     private static final int REQUEST_AUDIO_PERMISSION = 1001;
+    /** DLNA 投屏单独用一套请求码，避免和 Moonlight 串流的授权流程互相干扰 */
+    private static final int REQUEST_DLNA_PROJECTION = 1002;
     private MediaProjectionManager mediaProjectionManager;
     public static Context context;
     // 录屏权限请求中标记：防止连点重复弹权限框
     private static boolean isRequestingProjection = false;
+
+    /** DLNA 投屏实例（全局唯一） */
+    private DlnaStreamer dlnaStreamer;
+    /** 待投屏的目标接收端 */
+    private DlnaUpnp.Renderer pendingDlnaRenderer;
+    /** 最近一次搜索到的设备列表，dlnaStart 按下标取 */
+    private List<DlnaUpnp.Renderer> lastDiscovered;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,6 +56,57 @@ public class MainActivity extends FlutterActivity {
             @Override
             public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
                 switch (call.method) {
+                    case "dlnaDiscover": {
+                        // 搜索局域网内的 DLNA 接收端。放后台线程，避免阻塞 UI。
+                        new Thread(() -> {
+                            List<DlnaUpnp.Renderer> found = DlnaUpnp.discover(4000);
+                            List<Map<String, Object>> payload = new ArrayList<>();
+                            for (int i = 0; i < found.size(); i++) {
+                                Map<String, Object> m = new HashMap<>();
+                                m.put("index", i);
+                                m.put("name", found.get(i).name);
+                                m.put("location", found.get(i).location);
+                                payload.add(m);
+                            }
+                            lastDiscovered = found;
+                            runOnUiThread(() -> result.success(payload));
+                        }, "DlnaDiscover").start();
+                        break;
+                    }
+                    case "dlnaStart": {
+                        // 参数：设备索引。先请求录屏权限，授权回来再真正启动。
+                        Integer idx = (Integer) call.arguments;
+                        if (lastDiscovered == null || idx == null
+                                || idx < 0 || idx >= lastDiscovered.size()) {
+                            result.success("设备不存在，请重新搜索");
+                            break;
+                        }
+                        pendingDlnaRenderer = lastDiscovered.get(idx);
+                        if (isRequestingProjection) {
+                            result.success("正在请求录屏权限…");
+                            break;
+                        }
+                        isRequestingProjection = true;
+                        requestDlnaScreenCapture();
+                        result.success(null);
+                        break;
+                    }
+                    case "dlnaStop": {
+                        if (dlnaStreamer != null) {
+                            dlnaStreamer.stop();
+                            dlnaStreamer = null;
+                        }
+                        result.success(true);
+                        break;
+                    }
+                    case "dlnaStatus": {
+                        boolean running = dlnaStreamer != null && dlnaStreamer.isRunning();
+                        result.success(running
+                                ? ("1|" + dlnaStreamer.getTargetName()
+                                   + "|" + dlnaStreamer.getMediaUrl())
+                                : "0||");
+                        break;
+                    }
                     case "stop":
                         // 真正停服：停前台服务（释放 MediaProjection 与 mDNS），
                         // 再让 native 主循环收到 shutdown 事件退出并释放端口。
@@ -116,6 +184,12 @@ public class MainActivity extends FlutterActivity {
         startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
     }
 
+    /** 拉起 DLNA 投屏用的录屏授权框（独立请求码）。 */
+    private void requestDlnaScreenCapture() {
+        startActivityForResult(
+                mediaProjectionManager.createScreenCaptureIntent(), REQUEST_DLNA_PROJECTION);
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
@@ -141,6 +215,37 @@ public class MainActivity extends FlutterActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_DLNA_PROJECTION) {
+            isRequestingProjection = false;
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                Toast.makeText(this, "投屏授权失败", Toast.LENGTH_SHORT).show();
+                pendingDlnaRenderer = null;
+                return;
+            }
+            if (pendingDlnaRenderer == null) {
+                return;
+            }
+            final DlnaUpnp.Renderer renderer = pendingDlnaRenderer;
+            pendingDlnaRenderer = null;
+
+            // 启动投屏可能耗时（创建编码器/绑端口/发 SOAP），放后台线程
+            new Thread(() -> {
+                if (dlnaStreamer != null) {
+                    dlnaStreamer.stop();
+                }
+                DlnaStreamer streamer = new DlnaStreamer(MainActivity.this);
+                String error = streamer.start(resultCode, data, renderer);
+                if (error == null) {
+                    dlnaStreamer = streamer;
+                } else {
+                    runOnUiThread(() ->
+                            Toast.makeText(MainActivity.this, error, Toast.LENGTH_LONG).show());
+                }
+            }, "DlnaStart").start();
+            return;
+        }
+
         if (requestCode == REQUEST_CODE) {
             isRequestingProjection = false;
         }
