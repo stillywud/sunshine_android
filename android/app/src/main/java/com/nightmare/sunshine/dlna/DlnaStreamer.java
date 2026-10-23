@@ -36,17 +36,22 @@ public class DlnaStreamer {
     /**
      * 编码参数。
      *
-     * 960x540 在 1080p 的手机屏幕上放大后偏糊，投屏场景主要是看文档/网页/视频，
-     * 清晰度优先，所以提到 720p。码率 2.5Mbps 是局域网下的保守值——
-     * 实测无损需求的画面（桌面静止）远低于这个数，动态场景才吃满。
+     * 分辨率：960x540 在 1080p 屏幕上放大后偏糊，提到 720p。
      *
-     * I 帧间隔从 1 秒放宽到 2 秒：每秒一个关键帧会显著抬高平均码率，
-     * 而投屏只需要「新接入能尽快出画面」，2 秒足够，代价可接受。
+     * 帧率：按需求用 60fps 输出。真机上 720p60 是标准配置，编码器完全撑得住；
+     * 模拟器上实测编码能力有限（会掉帧），但不影响真机目标。
+     *
+     * 码率 6Mbps：局域网完全不是瓶颈（实测单连接能跑到几十 Mbps），
+     * 真正的瓶颈从来是接收端的播放缓冲，所以宁给足码率保画质，
+     * 延迟靠服务端的实时限速来解决（见 DlnaHttpServer.streamFrom）。
+     *
+     * I 帧间隔 2 秒：每秒一个关键帧会显著抬高平均码率（60fps 下 I 帧特别大），
+     * 2 秒足够让新接入的接收端尽快出画面。
      */
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
-    private static final int FPS = 25;
-    private static final int BITRATE = 2_500_000;
+    private static final int FPS = 60;
+    private static final int BITRATE = 6_000_000;
     private static final int I_FRAME_INTERVAL = 2; // 秒
     private static final String MIME_TS = "video/mp2t";
 
@@ -119,16 +124,7 @@ public class DlnaStreamer {
      * 换算成时间。数值大说明接收端拉不过来，画面会明显落后于实时。
      */
     public String getStats() {
-        long backlog = 0;
-        if (httpServer != null) {
-            long produced = httpServer.streamLength();
-            long served = httpServer.servedBytes();
-            long lag = produced - served;
-            if (lag > 0) {
-                long bytesPerSec = Math.max(1, measuredBitrate / 8);
-                backlog = lag / bytesPerSec;
-            }
-        }
+        long backlog = httpServer != null ? httpServer.lagSeconds() : 0;
         boolean clientActive = httpServer != null
                 && httpServer.clientCount() > 0
                 && System.currentTimeMillis() - httpServer.lastServedAt() < 3000;
@@ -204,12 +200,17 @@ public class DlnaStreamer {
 
             // 屏幕内容静止时，Surface 上没有新帧，编码器就彻底停止出帧。
             // 此时 HTTP 流不再增长，接收端缓冲耗尽后报 "handleError: -2" 断开
-            // （实测：静止 60 秒只产出 2 帧，播放器随即报错）。
+            // （实测：不设这个参数时，屏幕静止下视频只产出 1 帧/秒）。
             //
             // 让编码器在无新帧时按固定间隔重复上一帧，流就永远是活的。
-            // 这是录屏类应用的标配参数，个别编码器不认时会被忽略，不影响启动。
+            // 这是录屏类应用的标配参数。
+            //
+            // 副作用：编码器输出的「重复帧」也会被算进真实帧数，所以静止时
+            // 观测到的帧率会接近这个间隔对应的值，而不是 0。这是正常的，
+            // 不代表码率浪费——重复帧几乎没有数据量（几十字节）。
             format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
                     1_000_000L / FPS);
+
 
             encoder = MediaCodec.createEncoderByType("video/avc");
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
@@ -433,13 +434,13 @@ public class DlnaStreamer {
             // 上一次「真正发出一帧」（真实帧或补帧）的时刻
             long lastSentAt = System.currentTimeMillis();
 
-            // 补帧的最小间隔。必须和编码器的出帧节奏错开，
-            // 否则补帧会和真实帧叠在一起，让时间轴前进得比真实时间快。
-            //
-            // 实测踩过：原来按 2 个帧间隔补帧，但补帧也会让 muxer 的帧计数 +1，
-            // 于是视频轨 PTS 前进速度变成真实时间的 1.54 倍（38.4 对 25 fps），
-            // 播放端表现为画面越跑越超前、音画不同步。
+            // 补帧的最小间隔 = 一个帧周期。真实帧发出后会刷新 lastSentAt，
+            // 所以补帧只在「编码器真空闲」时发生，不会和真实帧叠加。
             final long repeatIntervalMs = Math.max(2, 1000L / FPS);
+            // 编码器自己已经有 KEY_REPEAT_PREVIOUS_FRAME_AFTER 在补帧（每帧周期
+            // 一个）。这里的兜底只在它完全失效时才该生效，所以门槛放到 8 个
+            // 帧周期——正常情况永远触发不到，避免两层补帧叠加抬高帧率和码率。
+            final long repeatTriggerMs = repeatIntervalMs * 8;
 
             while (running.get()) {
                 try {
@@ -490,7 +491,9 @@ public class DlnaStreamer {
                     // 注意这里用的是「距上次真正发帧」的时间，真实帧发出后会刷新
                     // lastSentAt，所以补帧只在真空闲时发生，不会和真实帧叠加。
                     long now = System.currentTimeMillis();
-                    if (lastFrame != null && now - lastSentAt >= repeatIntervalMs * 2L) {
+                    if (lastFrame != null && now - lastSentAt >= repeatTriggerMs) {
+                        // 补帧不计入 videoFrameCount：那是「真实编码帧」的统计，
+                        // 混进补帧会让帧率看起来比配置高，误导排查。
                         emitFrame(muxer.pushVideoRaw(lastFrame, lastWasKey), lastWasKey);
                         lastSentAt = now;
                     }

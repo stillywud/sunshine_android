@@ -43,6 +43,45 @@ public class DlnaHttpServer {
      */
     private static final long RANGE_WAIT_MS = 2000;
 
+    /**
+     * 允许接收端落后源画面多少秒。
+     *
+     * 这是「延迟」的直接控制点：超过这个量就丢弃积压、跳到最新关键帧。
+     * 投屏是看实时的，宁愿丢几帧也不要拖着几十秒。
+     */
+    private static final double MAX_LAG_SECONDS = 1.5;
+
+    /** 落后上限的最小字节数，防止码率很低时阈值小到频繁跳帧。 */
+    private static final long MIN_LAG_LIMIT_BYTES = 512 * 1024;
+
+    /**
+     * 限速时允许的突发余量（字节）。
+     *
+     * 给 300ms 的数据量，让播放器有点缓冲垫不至于卡在边缘，
+     * 但又不至于把几十秒的历史数据全吞进去。
+     */
+    private static final long BURST_ALLOWANCE_BYTES = 400 * 1024;
+
+    /** 最近窗口的字节吞吐，用于把「秒」换算成「字节」。 */
+    private long rateWindowStartAt = System.currentTimeMillis();
+    private long rateWindowBytes;
+    private volatile long bytesPerSec;
+
+    /** 当前估算的每秒字节数（带一次平滑，避免抖动）。 */
+    private long measuredBytesPerSec() {
+        long now = System.currentTimeMillis();
+        long elapsed = now - rateWindowStartAt;
+        if (elapsed >= 1000) {
+            long instant = (totalBytes() - rateWindowBytes) * 1000L / elapsed;
+            // 简单指数平滑：新值占 1/4，避免单次采样抖动影响跳帧判断
+            bytesPerSec = bytesPerSec == 0 ? instant : (bytesPerSec * 3 + instant) / 4;
+            rateWindowBytes = totalBytes();
+            rateWindowStartAt = now;
+        }
+        // 还没测出来时给个保守值（约 2.5Mbps），避免阈值过大
+        return bytesPerSec > 0 ? bytesPerSec : 320_000;
+    }
+
     private ServerSocket serverSocket;
     private Thread acceptThread;
     private volatile boolean running;
@@ -200,6 +239,27 @@ public class DlnaHttpServer {
         return servedBytes;
     }
 
+    /**
+     * 每个活跃连接当前读到流里的哪个绝对位置。
+     *
+     * 「积压」必须按这个算，不能用累计推送字节数——
+     * 后者是所有连接的历史累计量，多次连接/重连/外部探测都会让它虚高，
+     * 曾经因此导致积压永远显示 0，把真实延迟完全掩盖了。
+     */
+    private final java.util.Map<Integer, Long> connCursors =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger connSeq =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 记录某连接的读取进度 */
+    private void updateCursor(int connId, long cursor) {
+        connCursors.put(connId, cursor);
+    }
+
+    private void removeCursor(int connId) {
+        connCursors.remove(connId);
+    }
+
     /** 当前活跃的 HTTP 连接数。0 表示接收端没在拉流。 */
     private volatile int clientCount;
 
@@ -212,6 +272,32 @@ public class DlnaHttpServer {
 
     public long lastServedAt() {
         return lastServedAt;
+    }
+
+    /**
+     * 接收端当前落后源多少秒。
+     *
+     * 对每个活跃连接算「流最新位置 − 它读到的位置」，取其中最小的那个——
+     * 最小的代表最快的那个显示端，也就是用户实际看到的进度。
+     * 再除以码率换算成秒。
+     *
+     * 不能用「总产出 − 累计推送」来算：那是历史累计量，连接重连、
+     * 外部探测都会污染它，曾经因此把积压算成恒定 0，看不出真实延迟。
+     */
+    public long lagSeconds() {
+        long rate = measuredBytesPerSec();
+        if (rate <= 0 || connCursors.isEmpty()) {
+            return 0;
+        }
+        long newest = totalBytes();
+        long minLag = Long.MAX_VALUE;
+        for (Long cursor : connCursors.values()) {
+            long lag = newest - cursor;
+            if (lag < minLag) {
+                minLag = lag;
+            }
+        }
+        return minLag == Long.MAX_VALUE || minLag <= 0 ? 0 : minLag / rate;
     }
 
     private void acceptLoop() {
@@ -232,6 +318,7 @@ public class DlnaHttpServer {
     private void handle(Socket socket) {
         String remote = String.valueOf(socket.getRemoteSocketAddress());
         clientCount++;
+        final int connId = connSeq.incrementAndGet();
         try {
             socket.setSoTimeout(15000);
             InputStream in = socket.getInputStream();
@@ -339,11 +426,15 @@ public class DlnaHttpServer {
             out.write(head.toString().getBytes("UTF-8"));
             out.flush();
 
-            streamFrom(out, alignedFrom);
+            // 先登记起始位置，避免刚从连接建立到第一块数据写出之间
+            // 集合为空导致延迟误报 0
+            updateCursor(connId, alignedFrom);
+            streamFrom(out, alignedFrom, connId);
         } catch (Exception e) {
             Log.w(TAG, "连接结束 " + remote + ": " + e.getMessage());
         } finally {
             clientCount--;
+            removeCursor(connId);
             try {
                 socket.close();
             } catch (IOException ignored) {
@@ -352,10 +443,25 @@ public class DlnaHttpServer {
     }
 
     /** 从指定绝对偏移开始，把环形缓冲区里的数据持续推给客户端。 */
-    private void streamFrom(OutputStream out, long startOffset) throws IOException {
+    private void streamFrom(OutputStream out, long startOffset, int connId) throws IOException {
         // 对齐到 TS 包边界（188 字节）。播放器从半个包里开始会直接解析失败。
         long cursor = alignToPacket(startOffset);
         long lastWrite = System.currentTimeMillis();
+
+        // ---- 实时限速 ----
+        //
+        // 这是解决「画面滞后几十秒」的关键。
+        //
+        // 不限速时，服务端会以局域网的极限速度（实测几十 Mbps）把缓冲区里
+        // 积存的历史数据全推给接收端。接收端的播放器按字节数决定缓冲多少，
+        // 拿到这么多数据就先装满缓冲再慢慢播，于是它播的永远是几十秒前的
+        // 画面——而网络和编码其实一点都不慢。
+        //
+        // 做法：按「本连接开始时的流位置 + 之后真实经过的字节量」来控制
+        // 发送节奏，让接收端拿到的基本就是实时产生的那部分数据。
+        // 多给 300ms 的余量，避免因为抖动导致频繁等待。
+        long connStartCursor = cursor;
+        long connStartAt = System.currentTimeMillis();
 
         while (running) {
             byte[] chunk = null;
@@ -386,12 +492,27 @@ public class DlnaHttpServer {
                 }
                 // 播放器落后太多时跳到最新的关键帧（不能跳到任意位置，
                 // 否则解不出画面）。这里和续传不同，明确要「向前」追最新。
-                if (available > RING_CAPACITY * 0.6) {
-                    long skipTo = keyframeAtOrAfter(totalWritten - RING_CAPACITY / 3);
+                //
+                // 阈值决定「允许画面落后多少」。原来用环形缓冲的 60%（32MB 下
+                // 约 19MB），在 3.7Mbps 下等于容忍落后 41 秒——接收端只要拉得
+                // 稍慢就会稳定维持几十秒延迟，主观感受就是「严重滞后」。
+                //
+                // 投屏要的是实时性，允许的落后应该按「最多落后多少秒」来定，
+                // 而不是按缓冲容量。
+                //
+                // 注意跳帧本身也有代价：接收端会突然收到时间戳跳跃的数据，
+                // 部分播放器（实测光元素/ijk）会判定流异常直接结束播放。
+                // 所以只有在落后明显超过上限（2 倍）时才真跳，平时靠上面的
+                // 大块发送尽快追平。
+                long lagLimitBytes = Math.max(MIN_LAG_LIMIT_BYTES,
+                        (long) (measuredBytesPerSec() * MAX_LAG_SECONDS));
+                if (available > lagLimitBytes * 2) {
+                    long skipTo = keyframeAtOrAfter(totalWritten - lagLimitBytes);
                     if (skipTo < 0) {
-                        skipTo = totalWritten - RING_CAPACITY / 3;
+                        skipTo = totalWritten - lagLimitBytes;
                     }
-                    Log.w(TAG, "客户端落后 " + available + " 字节，跳到关键帧 " + skipTo);
+                    Log.w(TAG, "客户端落后 " + (available / 1024) + "KB，"
+                            + "超过 " + (MAX_LAG_SECONDS * 2) + " 秒上限，跳到关键帧 " + skipTo);
                     cursor = skipTo;
                     available = totalWritten - cursor;
                 }
@@ -407,6 +528,23 @@ public class DlnaHttpServer {
                     }
                     continue;
                 }
+
+                // 限速：本连接至今已发多少字节，对比它在这段时间里「应该」
+                // 收到多少（按流的真实产出速率算）。发得超前了就等一等，
+                // 让接收端不至于把几十秒的历史数据一次性塞进播放缓冲。
+                long allowed = (long) (measuredBytesPerSec()
+                        * (System.currentTimeMillis() - connStartAt) / 1000.0);
+                long sentSoFar = cursor - connStartCursor;
+                if (sentSoFar > allowed + BURST_ALLOWANCE_BYTES) {
+                    try {
+                        lock.wait(30);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    continue;
+                }
+
                 chunk = new byte[n];
                 int pos = (int) (cursor % RING_CAPACITY);
                 int firstPart = Math.min(n, RING_CAPACITY - pos);
@@ -420,6 +558,7 @@ public class DlnaHttpServer {
             out.flush();
             cursor += chunk.length;
             servedBytes += chunk.length;
+            updateCursor(connId, cursor);
             lastServedAt = System.currentTimeMillis();
             lastWrite = lastServedAt;
         }
