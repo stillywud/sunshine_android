@@ -122,6 +122,31 @@ public class HttpRegression {
                 }
             } finally { server.stop(); }
         });
+        cases.put("all retained IDRs stale: wait for a fresh IDR instead of replaying history", () -> {
+            DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
+            try {
+                server.write(packets(2, 90), true);
+                java.lang.reflect.Field historyField = DlnaHttpServer.class.getDeclaredField("keyframeHistory");
+                historyField.setAccessible(true);
+                Deque history = (Deque) historyField.get(server);
+                Object mark = history.peekLast();
+                java.lang.reflect.Constructor<?> ctor = mark.getClass().getDeclaredConstructor(long.class, long.class);
+                ctor.setAccessible(true);
+                history.clear();
+                history.add(ctor.newInstance(0L, System.nanoTime() - 10_000_000_000L));
+                try (Socket s = request(server, "")) {
+                    s.setSoTimeout(200);
+                    try {
+                        s.getInputStream().read();
+                        throw new AssertionError("stale IDR was accepted as a live start");
+                    } catch (SocketTimeoutException expected) { }
+                    byte[] fresh = packets(2, 91);
+                    server.write(fresh, true);
+                    s.setSoTimeout(1200);
+                    headers(s.getInputStream()); equal(fresh, s.getInputStream());
+                }
+            } finally { server.stop(); }
+        });
         cases.put("retained byte range preserves exact offset and bounded length", () -> {
             DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
             try {

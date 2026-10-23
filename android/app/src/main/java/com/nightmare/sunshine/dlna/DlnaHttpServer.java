@@ -357,6 +357,23 @@ public class DlnaHttpServer {
                     alignedFrom = requestedStart;
                     endExclusive = Math.min(requestedEnd, total - 1) + 1;
                 } else {
+                    // Falling back to the newest IDR is insufficient when it
+                    // too is stale. Wait for a new independently decodable
+                    // frame instead of replaying old video as live content.
+                    if (!requestLine.startsWith("HEAD ")) {
+                        long deadline = System.nanoTime() + 5_000_000_000L;
+                        while (!keyframeHistory.isEmpty()
+                                && System.nanoTime() - keyframeHistory.peekLast().atNanos
+                                        > LIVE_MAX_PREROLL_NANOS) {
+                            if (!running || System.nanoTime() >= deadline) {
+                                throw new IOException("No fresh IDR available for live start");
+                            }
+                            lock.wait(100);
+                        }
+                        if (!running) { return; }
+                        total = totalWritten;
+                        oldest = Math.max(0, total - RING_CAPACITY);
+                    }
                     alignedFrom = chooseLiveStart(total, oldest);
                 }
             }
