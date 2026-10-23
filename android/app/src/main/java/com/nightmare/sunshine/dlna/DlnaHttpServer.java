@@ -29,8 +29,18 @@ import java.util.Locale;
 public class DlnaHttpServer {
     private static final String TAG = "DlnaHttp";
 
-    /** 环形缓冲区容量。约 8MB，够缓冲十几秒的 4Mbps 流。 */
-    private static final int RING_CAPACITY = 32 * 1024 * 1024;
+    /**
+     * 环形缓冲区容量。
+     *
+     * 这里保存的是「最近的流数据」，供播放器续传时回读。
+     * 对实时投屏来说历史数据几乎没有价值，容量越大反而越糟：
+     * 播放器可以从很早的位置开始请求，然后一直补历史、永远追不上实时。
+     *
+     * 原来给 32MB（2Mbps 下能存 128 秒），实测播放器会请求 112 秒前的
+     * 位置，导致延迟巨大。降到 8MB（约 30 秒）既能覆盖正常的断线重连，
+     * 又不会让播放器陷进历史数据里。
+     */
+    private static final int RING_CAPACITY = 8 * 1024 * 1024;
 
     /** TS 包固定 188 字节。所有投递起点都必须对齐到包边界。 */
     private static final int TS_PACKET_SIZE = 188;
@@ -44,19 +54,11 @@ public class DlnaHttpServer {
     private static final long RANGE_WAIT_MS = 2000;
 
     /**
-     * 允许接收端落后源画面多少秒。
-     *
-     * 这是「延迟」的直接控制点：超过这个量就丢弃积压、跳到最新关键帧。
-     * 投屏是看实时的，宁愿丢几帧也不要拖着几十秒。
-     */
-    private static final double MAX_LAG_SECONDS = 1.5;
-
-    /**
      * 续传时，如果请求位置落后超过这么多秒，就直接跳到最新。
      *
-     * 这个值要大于 MAX_LAG_SECONDS：正常播放时本来就有 1 秒左右抖动，
-     * 每条连接都要宽容对待；但确实已经拖了几秒以上的历史，就该果断丢弃。
-     * 单独用一个常量是为了避免把「正常抖动」也当成「太旧」而频繁跳帧。
+     * 正常播放时本来就有 1 秒左右抖动，需要宽容；但确实已经拖了几秒以上
+     * 的历史，就该果断丢弃。单独用一个常量是为了避免把「正常抖动」
+     * 也当成「太旧」而频繁跳帧。
      */
     private static final double RESUME_JUMP_SECONDS = 4.0;
 
@@ -64,12 +66,21 @@ public class DlnaHttpServer {
     private static final long MIN_LAG_LIMIT_BYTES = 512 * 1024;
 
     /**
-     * 限速时允许的突发余量（字节）。
+     * 背压：发送窗口（字节）。
      *
-     * 给 300ms 的数据量，让播放器有点缓冲垫不至于卡在边缘，
-     * 但又不至于把几十秒的历史数据全吞进去。
+     * 这是整个推送逻辑的核心。含义是「接收端最多能领先实时多少数据」。
+     *
+     * 关键区别：以前用「累计产出速率 × 经过时间」当发送预算，那个值在屏幕
+     * 静止时会衰减到 0，预算不再增长，发送端就永久卡住（实测表现为
+     * 「一直加载中、出网字节不再增加」）。
+     *
+     * 现在改成真正的背压模型：维护一个「实时位置」，只允许 cursor 追到
+     * 实时位置 + 窗口大小。实时位置由流的真实产出推进（有数据就前进），
+     * 静止时不前进但也不倒退，所以发送端不会卡死，只是等待新数据。
+     *
+     * 窗口给 1 秒的量：够播放器有一点缓冲垫，又不会让它吞掉几十秒历史。
      */
-    private static final long BURST_ALLOWANCE_BYTES = 400 * 1024;
+    private static final long SEND_WINDOW_BYTES = 512 * 1024;
 
     /** 最近窗口的字节吞吐，用于把「秒」换算成「字节」。 */
     private long rateWindowStartAt = System.currentTimeMillis();
@@ -493,32 +504,42 @@ public class DlnaHttpServer {
         long cursor = alignToPacket(startOffset);
         long lastWrite = System.currentTimeMillis();
 
-        // ---- 实时限速 ----
+        // ---- 背压（backpressure）----
         //
-        // 这是解决「画面滞后几十秒」的关键。
+        // 这段是整个推送逻辑的核心，修过两轮，把踩过的坑都记下来：
         //
-        // 不限速时，服务端会以局域网的极限速度（实测几十 Mbps）把缓冲区里
-        // 积存的历史数据全推给接收端。接收端的播放器按字节数决定缓冲多少，
-        // 拿到这么多数据就先装满缓冲再慢慢播，于是它播的永远是几十秒前的
-        // 画面——而网络和编码其实一点都不慢。
+        // 【第一轮】完全不限速：服务端以局域网极限速度（几十 Mbps）把环形
+        // 缓冲里的历史数据全推过去。接收端播放器按字节数决定缓冲多少，
+        // 一口气收到几十 MB 就先装满缓冲再慢慢播，画面永远滞后几十秒。
         //
-        // 做法：按「流的最新位置 + 之后真实经过的字节量」控制发送节奏。
+        // 【第二轮】按「产出速率 × 经过时间」算发送预算：屏幕静止时产出
+        // 速率会衰减到 0，预算不再增长，发送端永久卡在等待里。实测表现为
+        // 「Screen Mirror 一直加载中、出网字节 92MB 后不再增加」。
         //
-        // 这里有个关键细节（踩过）：不能按「本连接起始位置」算。因为播放器
-        // 请求的起点可能本身就已经落后流末尾一段，那样限速只是维持这个
-        // 落后量不变，永远追不回来。必须以流末尾为基准，让每条连接都被
-        // 拉向「当前实时」。
-        long connStartAt = System.currentTimeMillis();
-        // 连接建立时流已产出多少字节。用它把「流末尾」映射到「本连接已发量」。
-        long startNewest = streamLength();
-        long startCursor = cursor;
-        // 如果起点已经落后很多，直接以它为基准没意义——从当前位置开始，
-        // 但把基准设成「起点 + 允许的落后量」，这样它会先快速追平这段落后。
-        long lagAtStart = startNewest - startCursor;
-        if (lagAtStart < 0) {
-            lagAtStart = 0;
+        // 【现在】真正的背压：只允许发送到「实时位置 + 窗口大小」。
+        //   - 实时位置 = 流的当前末尾（totalWritten），有数据就前进
+        //   - 静止时不前进，但也不会倒退，所以不会卡死，只是安静等待
+        //   - 窗口给 1 秒的量，够播放器有缓冲垫，又不让它吞掉几十秒历史
+        //
+        // 这个模型不依赖任何速率估算，天然免疫「速率测错」的问题。
+        //
+        // 起点先做一次对齐：如果播放器请求的位置已经落后窗口之外（比如断线
+        // 很久后回来，请求的是 112 秒前的位置），直接从那个位置开始慢慢追
+        // 是永远追不上的。所以先把起点拉到「实时位置 - 窗口」附近，
+        // 落在关键帧上，保证一上来就在窗口内。
+        {
+            long newest = totalWritten;
+            if (cursor < newest - SEND_WINDOW_BYTES) {
+                long target = newest - SEND_WINDOW_BYTES;
+                long aligned = keyframeAtOrAfter(target);
+                if (aligned < 0 || aligned > newest) {
+                    aligned = target;
+                }
+                Log.i(TAG, "起点落后 " + ((newest - cursor) / 1024) + "KB，"
+                        + "拉到窗口内 " + aligned);
+                cursor = aligned;
+            }
         }
-        long baseNewest = startCursor + Math.min(lagAtStart, BURST_ALLOWANCE_BYTES);
 
         while (running) {
             byte[] chunk = null;
@@ -547,34 +568,10 @@ public class DlnaHttpServer {
                     }
                     continue;
                 }
-                // 播放器落后太多时跳到最新的关键帧（不能跳到任意位置，
-                // 否则解不出画面）。这里和续传不同，明确要「向前」追最新。
-                //
-                // 阈值决定「允许画面落后多少」。原来用环形缓冲的 60%（32MB 下
-                // 约 19MB），在 3.7Mbps 下等于容忍落后 41 秒——接收端只要拉得
-                // 稍慢就会稳定维持几十秒延迟，主观感受就是「严重滞后」。
-                //
-                // 投屏要的是实时性，允许的落后应该按「最多落后多少秒」来定，
-                // 而不是按缓冲容量。
-                //
-                // 注意跳帧本身也有代价：接收端会突然收到时间戳跳跃的数据，
-                // 部分播放器（实测光元素/ijk）会判定流异常直接结束播放。
-                // 所以只有在落后明显超过上限（2 倍）时才真跳，平时靠上面的
-                // 大块发送尽快追平。
-                long lagLimitBytes = Math.max(MIN_LAG_LIMIT_BYTES,
-                        (long) (measuredBytesPerSec() * MAX_LAG_SECONDS));
-                if (available > lagLimitBytes * 2) {
-                    long skipTo = keyframeAtOrAfter(totalWritten - lagLimitBytes);
-                    if (skipTo < 0) {
-                        skipTo = totalWritten - lagLimitBytes;
-                    }
-                    Log.w(TAG, "客户端落后 " + (available / 1024) + "KB，"
-                            + "超过 " + (MAX_LAG_SECONDS * 2) + " 秒上限，跳到关键帧 " + skipTo);
-                    cursor = skipTo;
-                    available = totalWritten - cursor;
-                }
-                // 有多少发多少，不再强行按 188 对齐切片
-                // （对齐只在连接起始点做一次，见 streamFrom 开头）
+                // 有多少发多少。背压窗口已经在下面统一控制发送节奏，
+                // 这里不再单独做「落后太多就跳帧」——那个判断基于缓冲容量，
+                // 和背压窗口的语义冲突，而且跳帧会让播放器收到时间戳跳跃
+                // 的数据而判流异常退出。
                 int n = (int) Math.min(available, 64 * 1024);
                 if (n <= 0) {
                     try {
@@ -586,14 +583,16 @@ public class DlnaHttpServer {
                     continue;
                 }
 
-                // 限速：把「本连接已发量」和「这段时间里流该产出的量」对齐。
+                // 背压：只允许追到「实时位置 + 窗口」。
                 //
-                // 基准用 baseNewest（连接建立时的流末尾，或起点 + 允许的落后量），
-                // 这样每条连接都会被拉向实时位置，而不是维持它自己的落后量。
-                long elapsedMs = System.currentTimeMillis() - connStartAt;
-                long allowed = baseNewest + (long) (measuredBytesPerSec() * elapsedMs / 1000.0)
-                        + BURST_ALLOWANCE_BYTES;
-                if (cursor > allowed) {
+                // totalWritten 就是流的当前末尾（实时位置）。cursor 是这条连接
+                // 已经发到的位置。两者之差就是这条连接的落后量。
+                //
+                // 落后量超过窗口就等——这不是「限速」，而是「不让发送端跑在
+                // 播放器前面太多」。播放器拉得快就会立刻追上窗口，然后安静
+                // 等新数据，而不是把几十秒历史全塞进自己的缓冲。
+                if (cursor > totalWritten - SEND_WINDOW_BYTES) {
+                    // 已经发到窗口边缘，等新数据产生
                     try {
                         lock.wait(30);
                     } catch (InterruptedException e) {
