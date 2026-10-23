@@ -109,6 +109,19 @@ public class HttpRegression {
                 }
             } finally { server.stop(); }
         });
+        cases.put("live preroll drops an IDR older than the latency budget", () -> {
+            DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
+            try {
+                byte[] old = packets(2, 81);
+                server.markKeyframe(); server.write(old);
+                Thread.sleep(5100);
+                byte[] latest = packets(2, 82);
+                server.markKeyframe(); server.write(latest);
+                try (Socket s = request(server, "")) {
+                    headers(s.getInputStream()); equal(latest, s.getInputStream());
+                }
+            } finally { server.stop(); }
+        });
         cases.put("retained byte range preserves exact offset and bounded length", () -> {
             DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
             try {
