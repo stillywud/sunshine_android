@@ -11,6 +11,19 @@ import java.io.*;
 import java.util.*;
 public class MuxRegression {
     static long previousPcr = -1;
+    static long audioPts(byte[] ts) {
+        for (int i = 0; i < ts.length; i += 188) {
+            int pid = ((ts[i+1] & 31) << 8) | (ts[i+2] & 255);
+            if (pid != 257 || (ts[i+1] & 0x40) == 0) continue;
+            int start = i + 4;
+            if ((ts[i+3] & 0x20) != 0) start += 1 + (ts[i+4] & 255);
+            start += 9;
+            return (((ts[start] >> 1) & 7L) << 30) | ((ts[start+1] & 255L) << 22)
+                | (((ts[start+2] >> 1) & 127L) << 15) | ((ts[start+3] & 255L) << 7)
+                | ((ts[start+4] >> 1) & 127L);
+        }
+        throw new AssertionError("no audio PES");
+    }
     static void check(byte[] ts, byte[] raw, boolean key) throws Exception {
         ByteArrayOutputStream pes = new ByteArrayOutputStream();
         boolean foundPcr = false;
@@ -58,6 +71,18 @@ public class MuxRegression {
         if (clock == null || clock.length != 188 || (clock[3] & 0x30) != 0x20
                 || (clock[5] & 0x10) == 0) throw new AssertionError("PCR heartbeat must be adaptation-only");
         if (heartbeat.invoke(mux) != null) throw new AssertionError("PCR heartbeat not rate limited");
+        java.lang.reflect.Method audio;
+        try { audio = DlnaTsMuxer.class.getMethod("pushAudioRaw", byte[].class, boolean.class, long.class); }
+        catch (NoSuchMethodException e) { throw new AssertionError("audio must preserve codec capture timestamps across missing input"); }
+        long capture = System.nanoTime() / 1000L;
+        byte[] aac = {1, 2, 3, 4};
+        long first = audioPts((byte[])audio.invoke(mux, aac, false, capture));
+        long afterGap = audioPts((byte[])audio.invoke(mux, aac, false, capture + 2_000_000L));
+        if (afterGap - first != 180_000L)
+            throw new AssertionError("2s capture gap was compressed into one AAC frame");
+        long regressed = audioPts((byte[])audio.invoke(mux, aac, false, capture + 1_000_000L));
+        if (regressed <= afterGap) throw new AssertionError("audio clock regressed");
+        System.out.println("PASS audio capture clock survives a dropped-input interval and regressing codec PTS");
         System.out.println("PASS PCR clock, random access, AUD, 15 PES boundary sizes");
     }
 }

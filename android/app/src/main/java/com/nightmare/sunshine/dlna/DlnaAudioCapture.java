@@ -44,7 +44,7 @@ public class DlnaAudioCapture {
 
     /** 编码产出的回调：codecConfig=true 表示这是 AudioSpecificConfig（CSD），不是音频帧 */
     public interface OnFrame {
-        void onFrame(byte[] data, boolean codecConfig);
+        void onFrame(byte[] data, boolean codecConfig, long presentationTimeUs);
     }
 
     public boolean isRunning() {
@@ -120,9 +120,10 @@ public class DlnaAudioCapture {
     }
 
     private void startLoop(OnFrame callback) {
-        final byte[] pcm = new byte[AudioRecord.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT) * 2];
+        // Read one AAC frame (~21 ms), rather than a device-dependent multiple
+        // of the minimum recording buffer (often 80+ ms of capture latency).
+        final int bytesPerPcmFrame = CHANNEL_COUNT * 2;
+        final byte[] pcm = new byte[SAMPLES_PER_FRAME * bytesPerPcmFrame];
 
         thread = new Thread(() -> {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
@@ -130,15 +131,29 @@ public class DlnaAudioCapture {
                 try {
                     int n = record.read(pcm, 0, pcm.length);
                     if (n > 0) {
-                        int inIndex = encoder.dequeueInputBuffer(10_000);
-                        if (inIndex >= 0) {
+                        long captureStartUs = System.nanoTime() / 1000L
+                                - (n / bytesPerPcmFrame) * 1_000_000L / SAMPLE_RATE;
+                        int offset = 0;
+                        while (running.get() && offset < n) {
+                            // Retain this PCM block until accepted. Previously a
+                            // temporarily busy encoder silently dropped it and
+                            // the muxer's frame-count clock hid the missing time.
+                            drain(encoder, info, callback);
+                            int inIndex = encoder.dequeueInputBuffer(10_000);
+                            if (inIndex < 0) { continue; }
                             ByteBuffer ib = encoder.getInputBuffer(inIndex);
-                            if (ib != null) {
-                                ib.clear();
-                                ib.put(pcm, 0, n);
-                                encoder.queueInputBuffer(inIndex, 0, n,
-                                        System.nanoTime() / 1000, 0);
+                            if (ib == null) {
+                                throw new IllegalStateException("AAC input buffer unavailable");
                             }
+                            ib.clear();
+                            int count = Math.min(ib.remaining(), n - offset);
+                            count -= count % bytesPerPcmFrame;
+                            if (count == 0) { throw new IllegalStateException("AAC input buffer too small"); }
+                            ib.put(pcm, offset, count);
+                            long ptsUs = captureStartUs
+                                    + (offset / bytesPerPcmFrame) * 1_000_000L / SAMPLE_RATE;
+                            encoder.queueInputBuffer(inIndex, 0, count, ptsUs, 0);
+                            offset += count;
                         }
                     }
                     drain(encoder, info, callback);
@@ -172,7 +187,7 @@ public class DlnaAudioCapture {
                 buf.position(info.offset);
                 buf.get(data, 0, info.size);
                 boolean csd = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
-                callback.onFrame(data, csd);
+                callback.onFrame(data, csd, info.presentationTimeUs);
             }
             codec.releaseOutputBuffer(index, false);
         }

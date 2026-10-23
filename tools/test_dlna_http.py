@@ -10,6 +10,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 JAVA = r'''
 import com.nightmare.sunshine.dlna.DlnaHttpServer;
+import com.nightmare.sunshine.dlna.DlnaUpnp;
 import java.net.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -63,6 +64,37 @@ public class HttpRegression {
                     equal(tail, s.getInputStream());
                 }
             } finally { server.stop(); }
+        });
+        cases.put("live responses declare a sender-paced sliding stream, not a seekable file", () -> {
+            DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
+            try (Socket s = request(server, "getcontentFeatures.dlna.org: 1\r\n")) {
+                String h = headers(s.getInputStream());
+                if (!h.contains("transferMode.dlna.org: Streaming\r\n"))
+                    throw new AssertionError("missing DLNA streaming transfer mode");
+                if (!h.contains("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=8D100000000000000000000000000000\r\n"))
+                    throw new AssertionError("missing sender-paced, sliding-start, growing-end flags");
+                if (!h.contains("Accept-Ranges: none\r\n") || h.contains("Content-Length:"))
+                    throw new AssertionError("live response must not advertise a finite seekable file");
+            } finally { server.stop(); }
+        });
+        cases.put("UPnP metadata matches the HTTP live-stream capabilities", () -> {
+            java.lang.reflect.Method method = DlnaUpnp.class.getDeclaredMethod("buildMetadata", String.class, String.class);
+            method.setAccessible(true);
+            String metadata = (String)method.invoke(null, "http://127.0.0.1/live.ts?a=1&b=2", "video/mp2t");
+            if (!metadata.contains("object.item.videoItem.videoBroadcast"))
+                throw new AssertionError("live screen is advertised as an ordinary file");
+            if (!metadata.contains("DLNA.ORG_FLAGS=8D100000000000000000000000000000"))
+                throw new AssertionError("metadata lacks live source flags");
+            if (!metadata.contains("a=1&amp;b=2") || metadata.contains("duration="))
+                throw new AssertionError("bad live metadata XML or finite duration");
+        });
+        cases.put("standard SSDP LOCATION header is parsed without a subnet port scan", () -> {
+            java.lang.reflect.Field field = DlnaUpnp.class.getDeclaredField("LOCATION");
+            field.setAccessible(true);
+            java.util.regex.Pattern pattern = (java.util.regex.Pattern)field.get(null);
+            java.util.regex.Matcher matcher = pattern.matcher("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLoCaTiOn: http://192.168.1.2:49152/device.xml\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n");
+            if (!matcher.find() || !matcher.group(1).trim().equals("http://192.168.1.2:49152/device.xml"))
+                throw new AssertionError("SSDP uses HTTP headers, not <LOCATION> XML tags");
         });
         cases.put("new live client starts at newest retained keyframe", () -> {
             DlnaHttpServer server = new DlnaHttpServer("video/mp2t"); server.start(0);
@@ -142,5 +174,5 @@ with tempfile.TemporaryDirectory(prefix="dlna-http-test-") as directory:
     harness = tmp / "HttpRegression.java"
     harness.write_text(JAVA, encoding="utf-8")
     jdk = Path(os.environ.get("JAVA_HOME", r"C:\Program Files\Java\jdk-17")) / "bin"
-    subprocess.run([str(jdk / "javac"), "-encoding", "UTF-8", "-d", str(tmp), str(stub), str(harness), str(ROOT / "android/app/src/main/java/com/nightmare/sunshine/dlna/DlnaHttpServer.java")], check=True)
+    subprocess.run([str(jdk / "javac"), "-encoding", "UTF-8", "-d", str(tmp), str(stub), str(harness), *[str(ROOT / "android/app/src/main/java/com/nightmare/sunshine/dlna" / name) for name in ("DlnaHttpServer.java", "DlnaUpnp.java")]], check=True)
     subprocess.run([str(jdk / "java"), "-cp", str(tmp), "HttpRegression"], check=True)

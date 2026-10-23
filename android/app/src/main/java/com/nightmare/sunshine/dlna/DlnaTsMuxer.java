@@ -100,6 +100,7 @@ public class DlnaTsMuxer {
     private volatile long epochUs = -1;
     /** 音频首帧相对共用零点的 PTS 基准（微秒），-1 表示还没定 */
     private long audioBaseUs = -1;
+    private long lastAudioPtsUs;
     /** 上一个视频帧的 PTS，用于强制单调递增 */
     private long lastVideoPtsUs;
     private long lastPcrNs;
@@ -256,6 +257,12 @@ public class DlnaTsMuxer {
      * 加上 7 字节头兼容性最好，代价可以忽略。
      */
     public synchronized byte[] pushAudioRaw(byte[] aacFrame, boolean codecConfig) {
+        return pushAudioRaw(aacFrame, codecConfig, -1);
+    }
+
+    /** Preserve the common monotonic capture clock, including gaps in capture. */
+    public synchronized byte[] pushAudioRaw(byte[] aacFrame, boolean codecConfig,
+                                           long presentationTimeUs) {
         if (aacFrame == null || aacFrame.length == 0) {
             return null;
         }
@@ -273,12 +280,21 @@ public class DlnaTsMuxer {
         //
         // 关键是要和视频共用同一个时间零点，否则视频先跑几十秒、
         // 音频后启动时，两条轨的时间轴会错开。
-        if (audioBaseUs < 0) {
+        if (presentationTimeUs >= 0) {
+            // MediaCodec interpolates AAC frame PTS from PCM input timestamps.
+            // Counting output AAC frames instead would compress dropped/paused
+            // input intervals and progressively misalign audio with live video.
+            audioPtsUs = Math.max(lastAudioPtsUs + 1_000L,
+                    PTS_START_US + presentationTimeUs - epochFor(false));
+        } else if (audioBaseUs < 0) {
             // 首帧：记下相对共用零点的真实启动延迟
             audioBaseUs = PTS_START_US + elapsedUsSince(epochFor(false));
         }
-        audioPtsUs = audioBaseUs
-                + audioFrameIndex * (1_000_000L * AAC_SAMPLES_PER_FRAME / audioSampleRate);
+        if (presentationTimeUs < 0) {
+            audioPtsUs = audioBaseUs
+                    + audioFrameIndex * 1_000_000L * AAC_SAMPLES_PER_FRAME / audioSampleRate;
+        }
+        lastAudioPtsUs = audioPtsUs;
         audioFrameIndex++;
 
         writePatPmtIfNeeded();

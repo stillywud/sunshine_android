@@ -37,7 +37,8 @@ public class DlnaUpnp {
     private static final int SSDP_PORT = 1900;
 
     private static final Pattern LOCATION =
-            Pattern.compile("<LOCATION>(.*?)</LOCATION>", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("^LOCATION\\s*:\\s*(\\S+)\\s*$",
+                    Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
     private static final Pattern SERVER =
             Pattern.compile("<SERVER>(.*?)</SERVER>", Pattern.CASE_INSENSITIVE);
     private static final Pattern ST =
@@ -412,8 +413,9 @@ public class DlnaUpnp {
                 + "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
                 + "<item id=\"1\" parentID=\"0\" restricted=\"1\">"
                 + "<dc:title>Screen Mirror</dc:title>"
-                + "<upnp:class>object.item.videoItem</upnp:class>"
-                + "<res protocolInfo=\"http-get:*:" + mimeType + ":*\">"
+                + "<upnp:class>object.item.videoItem.videoBroadcast</upnp:class>"
+                + "<res protocolInfo=\"http-get:*:" + mimeType + ":"
+                + DlnaHttpServer.LIVE_CONTENT_FEATURES + "\">"
                 + escapeXml(mediaUrl)
                 + "</res></item></DIDL-Lite>";
     }

@@ -28,6 +28,12 @@ import java.util.Locale;
 public class DlnaHttpServer {
     private static final String TAG = "DlnaHttp";
 
+    // Sender paced; sliding beginning; growing end; Streaming; DLNA 1.5.
+    // No time/byte seeking is advertised for a fresh, unbounded live response.
+    // Deliberately omit a DLNA profile name: it must match the actual codec profile.
+    public static final String LIVE_CONTENT_FEATURES =
+            "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=8D100000000000000000000000000000";
+
     /**
      * 环形缓冲区容量。
      *
@@ -349,7 +355,11 @@ public class DlnaHttpServer {
                 head.append("HTTP/1.1 200 OK\r\n");
             }
             head.append("Content-Type: ").append(contentType).append("\r\n");
-            head.append("Accept-Ranges: bytes\r\n");
+            head.append("Accept-Ranges: ").append(partial ? "bytes" : "none").append("\r\n");
+            head.append("transferMode.dlna.org: Streaming\r\n");
+            if (!partial) {
+                head.append("contentFeatures.dlna.org: ").append(LIVE_CONTENT_FEATURES).append("\r\n");
+            }
             head.append("Cache-Control: no-cache, no-store\r\n");
             head.append("Pragma: no-cache\r\n");
             head.append("Connection: close\r\n");

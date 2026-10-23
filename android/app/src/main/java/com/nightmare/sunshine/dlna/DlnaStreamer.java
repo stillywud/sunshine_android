@@ -184,6 +184,10 @@ public class DlnaStreamer {
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
             format.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
+            // KEY_FRAME_RATE describes the coding rate; it does not throttle
+            // a 60 Hz Surface source. Drop excess frames before encoding so
+            // receivers are not forced to decode >2x the configured budget.
+            format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, (float) FPS);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);
 
             // 屏幕内容静止时，Surface 上没有新帧，编码器就彻底停止出帧。
@@ -281,9 +285,9 @@ public class DlnaStreamer {
     private void startAudio(MediaProjection projection) {
         audioError = null;
         DlnaAudioCapture capture = new DlnaAudioCapture();
-        String error = capture.start(projection, (data, codecConfig) -> {
+        String error = capture.start(projection, (data, codecConfig, presentationTimeUs) -> {
             synchronized (muxer) {
-                byte[] ts = muxer.pushAudioRaw(data, codecConfig);
+                byte[] ts = muxer.pushAudioRaw(data, codecConfig, presentationTimeUs);
                 if (ts != null) {
                     httpServer.write(ts);
                 }
@@ -417,6 +421,12 @@ public class DlnaStreamer {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             long frameCount = 0;
             long lastLog = 0;
+            long lastCodecPtsUs = -1;
+            long backwardsCodecPts = 0;
+            long timingWindowAtNs = System.nanoTime();
+            long timingWindowFrames = 0;
+            long ageMinUs = Long.MAX_VALUE;
+            long ageMaxUs = Long.MIN_VALUE;
 
             // 最近一帧的编码数据（含是否关键帧），静止时用来重复发送
             byte[] lastFrame = null;
@@ -445,6 +455,15 @@ public class DlnaStreamer {
                                 muxer.setVideoCodecConfig(csd);
                                 Log.i(TAG, "收到 SPS/PPS, " + csd.length + " 字节");
                             } else {
+                                long dequeuedAtNs = System.nanoTime();
+                                long ageUs = dequeuedAtNs / 1000L - info.presentationTimeUs;
+                                ageMinUs = Math.min(ageMinUs, ageUs);
+                                ageMaxUs = Math.max(ageMaxUs, ageUs);
+                                if (lastCodecPtsUs >= 0 && info.presentationTimeUs <= lastCodecPtsUs) {
+                                    backwardsCodecPts++;
+                                }
+                                lastCodecPtsUs = info.presentationTimeUs;
+                                timingWindowFrames++;
                                 boolean keyFrame =
                                         (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                                 // 留一份裸数据，静止时重复发
@@ -464,6 +483,15 @@ public class DlnaStreamer {
                                 long now = lastSentAt;
                                 if (now - lastLog > 5000) {
                                     lastLog = now;
+                                    long elapsedNs = dequeuedAtNs - timingWindowAtNs;
+                                    Log.i(TAG, "timing fps=" + (elapsedNs > 0
+                                            ? timingWindowFrames * 1_000_000_000.0 / elapsedNs : 0)
+                                            + " codecAgeUs=" + ageMinUs + ".." + ageMaxUs
+                                            + " nonMonotonicCodecPts=" + backwardsCodecPts);
+                                    timingWindowAtNs = dequeuedAtNs;
+                                    timingWindowFrames = 0;
+                                    ageMinUs = Long.MAX_VALUE;
+                                    ageMaxUs = Long.MIN_VALUE;
                                     Log.i(TAG, "已编码 " + frameCount + " 帧视频, "
                                             + audioFrameCount + " 帧音频, 流总长 "
                                             + httpServer.streamLength() + " 字节");
