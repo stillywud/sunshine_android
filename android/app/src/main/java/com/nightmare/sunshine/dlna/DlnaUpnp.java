@@ -415,9 +415,32 @@ public class DlnaUpnp {
      * @param mimeType  视频 MIME，TS 用 video/mp2t
      */
     public static boolean play(Renderer r, String mediaUrl, String mimeType) {
+        return play(r, mediaUrl, mimeType, 0L);
+    }
+
+    /**
+     * 同上，但允许在 Stop 与 SetAVTransportURI 之间等待。
+     *
+     * 接收端应用在收到新 URI 时会立刻重建播放器,而旧播放器的销毁是异步的:
+     * 两者重叠时,新播放器会在视频尺寸未知(0x0)时就配置硬件解码器
+     * ("Wrong cropped rect (0,0,0,0)"),配置失败后回退到软解,画面周期性
+     * 跳帧,最终触发接收端 30 秒加载超时(-2)。给销毁留出结算时间即可
+     * 避免这个竞态。
+     *
+     * @param settleAfterStopMs Stop 之后、SetAVTransportURI 之前的等待毫秒数
+     */
+    public static boolean play(Renderer r, String mediaUrl, String mimeType, long settleAfterStopMs) {
         try {
             // 先停止上一个（忽略失败）
             soap(r, "Stop", "<InstanceID>0</InstanceID>");
+            if (settleAfterStopMs > 0) {
+                try {
+                    Thread.sleep(settleAfterStopMs);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
 
             String meta = buildMetadata(mediaUrl, mimeType);
             String setUri = "<InstanceID>0</InstanceID>"

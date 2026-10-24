@@ -40,7 +40,13 @@ public class DlnaStreamer {
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
     private static final int FPS = 25;
-    private static final int BITRATE = 3_000_000;
+    /**
+     * 接收端播放器的起播缓冲阈值按字计量(两次独立实测都指向约 1.4MB:
+     * 4.3s×2.6Mbps 与 6.4s×1.8Mbps),不是按时间。把码率提到 6Mbps 后,
+     * 同样的字节阈值只折合 ~2 秒,从流开头加入的滞后随之降到 3 秒级,
+     * 不再需要任何播放中重载。
+     */
+    private static final int BITRATE = 6_000_000;
     private static final int I_FRAME_INTERVAL = 2; // 秒
     private static final String MIME_TS = "video/mp2t";
 
@@ -65,9 +71,24 @@ public class DlnaStreamer {
     /** 当前推送给接收端的地址（含变体查询参数）；漂移恢复时递增。 */
     private volatile String livePushUrl;
     private final AtomicInteger liveRepush = new AtomicInteger();
-    /** 流稳定后用于回到直播边缘的一次性重推线程。 */
-    private volatile Thread startupRepusher;
-    private static final long STARTUP_REPUSH_DELAY_MS = 20_000;
+    /** 最近一次重推的重载看门狗线程。 */
+    private volatile Thread reloadWatchdog;
+    /**
+     * Stop 与 SetAVTransportURI 之间的结算延迟:接收端旧播放器的销毁是异步的,
+     * 立刻重推会让新播放器与销毁竞态,渲染管线(GL 着色器/解码器配置)损坏,
+     * 画面永久停在加载界面直至 30 秒超时 -2。
+     */
+    private static final long RELOAD_SETTLE_MS = 800;
+    /**
+     * 漂移恢复的保守门槛:任何重载对接收端都是一次 30 秒级的事故风险,
+     * 只有确实落后到难以观看时才值得赌一次。
+     */
+    private static final long RELOAD_DRIFT_MS = 4_000;
+    private static final long RELOAD_COOLDOWN_MS = 120_000;
+    private static final long RELOAD_WATCHDOG_POLL_MS = 2_000;
+    /** 覆盖接收端 30 秒加载超时后再加余量,然后才允许唯一一次重试。 */
+    private static final int RELOAD_WATCHDOG_SAMPLES = 20;
+    private static final int RELOAD_MAX_RETRIES = 1;
 
     /** 音频采集（可选）。null 或未运行时表示纯视频投屏。 */
     private DlnaAudioCapture audioCapture;
@@ -312,56 +333,15 @@ public class DlnaStreamer {
                 }
                 liveRepush.set(0);
                 livePushUrl = mediaUrl;
-                pushed = DlnaUpnp.play(renderer, mediaUrl, mimeType);
+                pushed = DlnaUpnp.play(renderer, mediaUrl, mimeType, RELOAD_SETTLE_MS);
                 if (pushed && lowLatency && !stopping.get()) {
-                    // 接收端从流开头跟随会持续累积内部缓冲(实测约 6.5 秒);
-                    // 从直播边缘中途加入则稳定在窗口加准备开销(约 3.2 秒)。
-                    // 流稳定后自动变体重推一次,让接收端回到直播边缘。
-                    Thread repusher = new Thread(() -> {
-                        try {
-                            Thread.sleep(STARTUP_REPUSH_DELAY_MS);
-                        } catch (InterruptedException interrupted) {
-                            return;
-                        }
+                    playbackMonitor = new DlnaPlaybackMonitor(renderer, mediaUrl,
+                            RELOAD_DRIFT_MS, RELOAD_COOLDOWN_MS, () -> {
                         synchronized (transportLock) {
                             if (stopping.get() || !running.get() || target != renderer) {
                                 return;
                             }
-                            String varied = mediaUrl + "?r=" + liveRepush.incrementAndGet();
-                            Log.i(TAG, "启动滞后纠正;变体重推回到直播边缘: " + varied);
-                            if (DlnaUpnp.play(renderer, varied, mimeType)) {
-                                livePushUrl = varied;
-                                DlnaPlaybackMonitor monitor = playbackMonitor;
-                                if (monitor != null) {
-                                    monitor.updateExpectedUrl(varied);
-                                }
-                            } else {
-                                Log.w(TAG, "启动滞后纠正重推失败");
-                            }
-                        }
-                    }, "DlnaStartupRepush");
-                    repusher.setDaemon(true);
-                    startupRepusher = repusher;
-                    repusher.start();
-                    playbackMonitor = new DlnaPlaybackMonitor(renderer, mediaUrl, () -> {
-                        synchronized (transportLock) {
-                            if (stopping.get() || !running.get() || target != renderer) {
-                                return;
-                            }
-                            // 同一地址重复 SetAVTransportURI 会被接收端忽略,
-                            // 滞后会一直累积直到接收端自行报错。附加变体查询
-                            // 参数让接收端把它当作新媒体,在当前直播边缘重载。
-                            String varied = mediaUrl + "?r=" + liveRepush.incrementAndGet();
-                            Log.w(TAG, "接收端播放落后;变体重推以回到直播边缘: " + varied);
-                            if (DlnaUpnp.play(renderer, varied, mimeType)) {
-                                livePushUrl = varied;
-                                DlnaPlaybackMonitor monitor = playbackMonitor;
-                                if (monitor != null) {
-                                    monitor.updateExpectedUrl(varied);
-                                }
-                            } else {
-                                Log.w(TAG, "AVTransport 变体重推失败");
-                            }
+                            repushVaried(renderer, mimeType, "接收端播放落后");
                         }
                     });
                     playbackMonitor.start();
@@ -379,6 +359,81 @@ public class DlnaStreamer {
             stop();
             return "启动失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 用变体查询参数把当前直播重新推给接收端,并挂一个重载看门狗。
+     *
+     * 同一地址重复 SetAVTransportURI 会被接收端忽略;附加变体参数让它当作
+     * 新媒体重载。重载可能与旧播放器的异步销毁竞态(解码器以 0x0 尺寸配置
+     * 失败、回退软解、周期跳帧、30 秒加载超时 -2),因此除了 Stop 与
+     * SetAVTransportURI 之间的结算延迟,还会在看门狗确认位置推进失败时
+     * 有限次自动重推。
+     */
+    private void repushVaried(DlnaUpnp.Renderer renderer, String mimeType, String reason) {
+        String varied = mediaUrl + "?r=" + liveRepush.incrementAndGet();
+        Log.w(TAG, reason + ";变体重推回到直播边缘: " + varied);
+        if (DlnaUpnp.play(renderer, varied, mimeType, RELOAD_SETTLE_MS)) {
+            livePushUrl = varied;
+            DlnaPlaybackMonitor monitor = playbackMonitor;
+            if (monitor != null) {
+                monitor.updateExpectedUrl(varied);
+            }
+            watchReload(varied, mimeType, 0);
+        } else {
+            Log.w(TAG, reason + "重推失败");
+        }
+    }
+
+    /**
+     * 重载看门狗:重推后接收端会重新从 0 开始缓冲并推进位置。若传输状态
+     * 一直是 PLAYING 而位置始终为 0,说明重载撞上了销毁/初始化竞态(接收端
+     * 将在 30 秒加载超时后报 -2),此时再重推一次给播放器一次干净的初始化。
+     */
+    private void watchReload(String pushedUrl, String mimeType, int attempt) {
+        if (attempt >= RELOAD_MAX_RETRIES) {
+            Log.w(TAG, "重载看门狗达到重试上限,等待下一次漂移恢复: " + pushedUrl);
+            return;
+        }
+        Thread watchdog = new Thread(() -> {
+            long previousPosition = -1;
+            boolean advanced = false;
+            for (int sampled = 0; sampled < RELOAD_WATCHDOG_SAMPLES; sampled++) {
+                try {
+                    Thread.sleep(RELOAD_WATCHDOG_POLL_MS);
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+                if (stopping.get() || !running.get()) {
+                    return;
+                }
+                DlnaUpnp.PlaybackSnapshot snapshot = DlnaUpnp.getPlaybackSnapshot(target);
+                if (snapshot == null || !"PLAYING".equals(snapshot.transportState)) {
+                    continue;
+                }
+                if (!DlnaPlaybackMonitor.sameMediaUri(snapshot.mediaUri, pushedUrl)) {
+                    return;
+                }
+                if (snapshot.positionMs > 0 && snapshot.positionMs > previousPosition) {
+                    advanced = true;
+                    break;
+                }
+                previousPosition = snapshot.positionMs;
+            }
+            if (advanced || stopping.get() || !running.get()) {
+                return;
+            }
+            Log.w(TAG, "重载后接收端位置未推进,自动重推(第 " + (attempt + 1) + " 次)");
+            synchronized (transportLock) {
+                if (stopping.get() || !running.get() || target == null) {
+                    return;
+                }
+                repushVaried(target, mimeType, "重载看门狗");
+            }
+        }, "DlnaReloadWatchdog");
+        watchdog.setDaemon(true);
+        reloadWatchdog = watchdog;
+        watchdog.start();
     }
 
     /**
@@ -423,10 +478,10 @@ public class DlnaStreamer {
         if (monitor != null) {
             monitor.stop();
         }
-        Thread repusher = startupRepusher;
-        startupRepusher = null;
-        if (repusher != null) {
-            repusher.interrupt();
+        Thread watchdog = reloadWatchdog;
+        reloadWatchdog = null;
+        if (watchdog != null) {
+            watchdog.interrupt();
         }
         DlnaVideoSource source = videoSource;
         videoSource = null;

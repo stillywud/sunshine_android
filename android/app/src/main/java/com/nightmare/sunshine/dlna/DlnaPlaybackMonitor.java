@@ -11,15 +11,27 @@ public final class DlnaPlaybackMonitor {
     private final Renderer renderer;
     private volatile String expectedUrl;
     private final Runnable onDrift;
+    private final long driftMs;
+    private final long cooldownMs;
     private volatile DriftTracker tracker;
     private volatile Thread worker;
 
     public DlnaPlaybackMonitor(Renderer renderer, String expectedUrl, Runnable onDrift) {
+        this(renderer, expectedUrl, 2_000L, 20_000L, onDrift);
+    }
+
+    public DlnaPlaybackMonitor(Renderer renderer, String expectedUrl, long driftMs,
+            long cooldownMs, Runnable onDrift) {
         if (renderer == null || expectedUrl == null || expectedUrl.isEmpty() || onDrift == null) {
             throw new IllegalArgumentException("Renderer, expected URL and callback are required");
         }
+        if (driftMs <= 0 || cooldownMs <= 0) {
+            throw new IllegalArgumentException("Drift threshold and cooldown must be positive");
+        }
         this.renderer = renderer;
         this.expectedUrl = expectedUrl;
+        this.driftMs = driftMs;
+        this.cooldownMs = cooldownMs;
         this.onDrift = onDrift;
     }
 
@@ -93,7 +105,7 @@ public final class DlnaPlaybackMonitor {
     }
 
     private void monitor() {
-        DriftTracker localTracker = new DriftTracker(expectedUrl);
+        DriftTracker localTracker = new DriftTracker(expectedUrl, driftMs, cooldownMs);
         tracker = localTracker;
         long started = System.nanoTime();
         try {
@@ -136,10 +148,10 @@ public final class DlnaPlaybackMonitor {
 
     static final class DriftTracker {
         private static final long WARMUP_MS = 10000;
-        private static final long DRIFT_MS = 2000;
-        private static final long COOLDOWN_MS = 20000;
 
         private String expectedUrl;
+        private final long driftMs;
+        private final long cooldownMs;
         private boolean initialized;
         private boolean advancing;
         private boolean stabilized;
@@ -152,8 +164,10 @@ public final class DlnaPlaybackMonitor {
         private long lastRecovery;
         private int deficitSamples;
 
-        DriftTracker(String expectedUrl) {
+        DriftTracker(String expectedUrl, long driftMs, long cooldownMs) {
             this.expectedUrl = expectedUrl;
+            this.driftMs = driftMs;
+            this.cooldownMs = cooldownMs;
         }
 
         void updateExpectedUrl(String url) {
@@ -203,7 +217,7 @@ public final class DlnaPlaybackMonitor {
                 return false;
             }
             bestOffset = Math.min(bestOffset, offset);
-            if ((recovered && nowMs - lastRecovery < COOLDOWN_MS) || offset - bestOffset < DRIFT_MS) {
+            if ((recovered && nowMs - lastRecovery < cooldownMs) || offset - bestOffset < driftMs) {
                 deficitSamples = 0;
                 return false;
             }

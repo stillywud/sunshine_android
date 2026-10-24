@@ -71,9 +71,9 @@ public class PlaybackMonitorRegression {
         final Method observe;
         Tracker() throws Exception {
             Class<?> type = requiredClass(MONITOR + "$DriftTracker");
-            Constructor<?> constructor = type.getDeclaredConstructor(String.class);
+            Constructor<?> constructor = type.getDeclaredConstructor(String.class, long.class, long.class);
             constructor.setAccessible(true);
-            target = constructor.newInstance(EXPECTED);
+            target = constructor.newInstance(EXPECTED, 2_000L, 20_000L);
             observe = type.getDeclaredMethod("observe", long.class, String.class, long.class, String.class);
             observe.setAccessible(true);
         }
@@ -521,9 +521,9 @@ public class PlaybackMonitorRegression {
         });
         cases.put("updateExpectedUrl-redirects-acceptance-to-recovered-stream", () -> {
             Class<?> type = requiredClass(MONITOR + "$DriftTracker");
-            Constructor<?> constructor = type.getDeclaredConstructor(String.class);
+            Constructor<?> constructor = type.getDeclaredConstructor(String.class, long.class, long.class);
             constructor.setAccessible(true);
-            Object target = constructor.newInstance(EXPECTED);
+            Object target = constructor.newInstance(EXPECTED, 2_000L, 20_000L);
             Method observe = type.getDeclaredMethod("observe", long.class, String.class, long.class, String.class);
             observe.setAccessible(true);
             Method update = type.getDeclaredMethod("updateExpectedUrl", String.class);
