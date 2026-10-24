@@ -3,6 +3,8 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
+import 'widgets/dlna_mode_selector.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -275,6 +277,7 @@ class _StopwatchPageState extends State<StopwatchPage> {
   // DLNA 投屏状态
   bool _dlnaRunning = false;
   bool _dlnaScanning = false;
+  bool _dlnaLowLatency = true;
   String _dlnaTarget = '';
   // 音频轨状态：投屏中才有意义
   bool _dlnaHasAudio = false;
@@ -746,6 +749,15 @@ class _StopwatchPageState extends State<StopwatchPage> {
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+              DlnaModeSelector(
+                lowLatency: _dlnaLowLatency,
+                onChanged: _dlnaRunning
+                    ? null
+                    : (lowLatency) {
+                        setState(() => _dlnaLowLatency = lowLatency);
+                      },
+              ),
               // 音频轨状态：只在投屏中显示。没有音频时把原因讲清楚，
               // 免得用户以为是投屏坏了。最常见的原因是系统版本 < Android 10。
               if (_dlnaRunning && !_dlnaHasAudio && _dlnaAudioError.isNotEmpty)
@@ -839,7 +851,10 @@ class _StopwatchPageState extends State<StopwatchPage> {
                       for (int i = 0; i < _dlnaDevices.length; i++)
                         InkWell(
                           onTap: () {
-                            channel.invokeMethod('dlnaStart', i);
+                            channel.invokeMethod('dlnaStart', {
+                              'index': i,
+                              'lowLatency': _dlnaLowLatency,
+                            });
                           },
                           child: Container(
                             padding: const EdgeInsets.symmetric(

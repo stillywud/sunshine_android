@@ -215,5 +215,5 @@ with tempfile.TemporaryDirectory(prefix="dlna-http-test-") as directory:
     harness = tmp / "HttpRegression.java"
     harness.write_text(JAVA, encoding="utf-8")
     jdk = Path(os.environ.get("JAVA_HOME", r"C:\Program Files\Java\jdk-17")) / "bin"
-    subprocess.run([str(jdk / "javac"), "-encoding", "UTF-8", "-d", str(tmp), str(stub), str(harness), *[str(ROOT / "android/app/src/main/java/com/nightmare/sunshine/dlna" / name) for name in ("DlnaHttpServer.java", "DlnaUpnp.java")]], check=True)
+    subprocess.run([str(jdk / "javac"), "-encoding", "UTF-8", "-d", str(tmp), str(stub), str(harness), *[str(ROOT / "android/app/src/main/java/com/nightmare/sunshine/dlna" / name) for name in ("DlnaHttpServer.java", "DlnaHlsStore.java", "DlnaUpnp.java")]], check=True)
     subprocess.run([str(jdk / "java"), "-cp", str(tmp), "HttpRegression"], check=True)

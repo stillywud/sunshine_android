@@ -45,6 +45,7 @@ public class MainActivity extends FlutterActivity {
     private DlnaStreamer dlnaStreamer;
     /** 待投屏的目标接收端 */
     private DlnaUpnp.Renderer pendingDlnaRenderer;
+    private boolean pendingDlnaLowLatency = true;
     /** 最近一次搜索到的设备列表，dlnaStart 按下标取 */
     private List<DlnaUpnp.Renderer> lastDiscovered;
 
@@ -78,17 +79,23 @@ public class MainActivity extends FlutterActivity {
                     }
                     case "dlnaStart": {
                         // 参数：设备索引。先请求录屏权限，授权回来再真正启动。
-                        Integer idx = (Integer) call.arguments;
+                        Integer idx = call.arguments instanceof Map
+                                ? call.argument("index")
+                                : (Integer) call.arguments;
+                        Boolean lowLatency = call.arguments instanceof Map
+                                ? call.argument("lowLatency")
+                                : null;
                         if (lastDiscovered == null || idx == null
                                 || idx < 0 || idx >= lastDiscovered.size()) {
                             result.success("设备不存在，请重新搜索");
                             break;
                         }
-                        pendingDlnaRenderer = lastDiscovered.get(idx);
                         if (isRequestingProjection) {
                             result.success("正在请求录屏权限…");
                             break;
                         }
+                        pendingDlnaRenderer = lastDiscovered.get(idx);
+                        pendingDlnaLowLatency = lowLatency == null || lowLatency;
                         isRequestingProjection = true;
 
                         // AudioPlaybackCapture 需要 RECORD_AUDIO 运行时授权，
@@ -296,6 +303,7 @@ public class MainActivity extends FlutterActivity {
                 return;
             }
             final DlnaUpnp.Renderer renderer = pendingDlnaRenderer;
+            final boolean lowLatency = pendingDlnaLowLatency;
             pendingDlnaRenderer = null;
 
             // 先把前台服务拉起来，再创建 MediaProjection。
@@ -316,7 +324,7 @@ public class MainActivity extends FlutterActivity {
                     dlnaStreamer.stop();
                 }
                 DlnaStreamer streamer = new DlnaStreamer(MainActivity.this);
-                String error = streamer.start(rc, resultData, renderer);
+                String error = streamer.start(rc, resultData, renderer, lowLatency);
                 if (error == null) {
                     dlnaStreamer = streamer;
                 } else {

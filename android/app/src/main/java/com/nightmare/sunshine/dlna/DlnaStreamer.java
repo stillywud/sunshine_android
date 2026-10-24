@@ -45,17 +45,22 @@ public class DlnaStreamer {
 
     private final Context context;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicBoolean stopping = new AtomicBoolean(false);
+    private final Object transportLock = new Object();
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private MediaCodec encoder;
     private Surface inputSurface;
+    private DlnaVideoSource videoSource;
+    private volatile DlnaPlaybackMonitor playbackMonitor;
     private DlnaTsMuxer muxer;
     private DlnaHttpServer httpServer;
     private Thread drainThread;
 
     private DlnaUpnp.Renderer target;
     private String mediaUrl;
+    private boolean lowLatency;
 
     /** 音频采集（可选）。null 或未运行时表示纯视频投屏。 */
     private DlnaAudioCapture audioCapture;
@@ -163,12 +168,18 @@ public class DlnaStreamer {
      * @return 成功返回 null，失败返回原因
      */
     public String start(int resultCode, Intent data, DlnaUpnp.Renderer renderer) {
+        return start(resultCode, data, renderer, true);
+    }
+
+    public String start(int resultCode, Intent data, DlnaUpnp.Renderer renderer, boolean lowLatency) {
         if (!running.compareAndSet(false, true)) {
             return "投屏已经在运行";
         }
+        stopping.set(false);
 
         try {
             target = renderer;
+            this.lowLatency = lowLatency;
 
             // 1. 屏幕采集
             MediaProjectionManager mgr =
@@ -188,7 +199,11 @@ public class DlnaStreamer {
             // a 60 Hz Surface source. Drop excess frames before encoding so
             // receivers are not forced to decode >2x the configured budget.
             format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, (float) FPS);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);
+            if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+                format.setFloat(MediaFormat.KEY_I_FRAME_INTERVAL, 0.5f);
+            } else {
+                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, lowLatency ? 1 : I_FRAME_INTERVAL);
+            }
             // Request the codec's lowest supported pipeline latency. Hardware
             // encoders may otherwise retain several input frames even though
             // the transport is already live and paced.
@@ -206,8 +221,10 @@ public class DlnaStreamer {
             // 副作用：编码器输出的「重复帧」也会被算进真实帧数，所以静止时
             // 观测到的帧率会接近这个间隔对应的值，而不是 0。这是正常的，
             // 不代表码率浪费——重复帧几乎没有数据量（几十字节）。
-            format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
-                    1_000_000L / FPS);
+            if (!lowLatency) {
+                format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
+                        1_000_000L / FPS);
+            }
 
 
             encoder = MediaCodec.createEncoderByType("video/avc");
@@ -227,7 +244,8 @@ public class DlnaStreamer {
             if (ip == null) {
                 throw new IllegalStateException("无法获取本机 IP，请检查网络");
             }
-            mediaUrl = "http://" + ip + ":" + port + "/live.ts";
+            String mimeType = lowLatency ? DlnaHlsStore.MIME_TYPE : MIME_TS;
+            mediaUrl = "http://" + ip + ":" + port + (lowLatency ? "/live.m3u8" : "/live.ts");
             Log.i(TAG, "流地址: " + mediaUrl);
 
             // 4. 必须先注册 MediaProjection 回调，再 createVirtualDisplay。
@@ -254,11 +272,24 @@ public class DlnaStreamer {
             Log.i(TAG, "MediaProjection 回调已注册");
 
             // 5. 虚拟显示器，把屏幕内容投到编码器的 Surface
+            Surface captureSurface = inputSurface;
+            int captureWidth = size[0];
+            int captureHeight = size[1];
+            if (lowLatency) {
+                videoSource = new DlnaVideoSource(inputSurface, size[0], size[1], WIDTH, HEIGHT, FPS,
+                        error -> mainHandler.post(() -> {
+                            Log.w(TAG, "DLNA video source failed: " + error.getMessage());
+                            stop();
+                        }));
+                captureSurface = videoSource.start();
+                captureWidth = videoSource.getCaptureWidth();
+                captureHeight = videoSource.getCaptureHeight();
+            }
             virtualDisplay = projection.createVirtualDisplay(
                     "sunshine-dlna",
-                    size[0], size[1], size[2],
+                    captureWidth, captureHeight, size[2],
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    inputSurface, null, null);
+                    captureSurface, null, null);
 
             // 6. 开始把编码输出喂给 muxer
             startDraining();
@@ -267,7 +298,29 @@ public class DlnaStreamer {
             startAudio(projection);
 
             // 8. 推送 URL 给接收端
-            boolean pushed = DlnaUpnp.play(renderer, mediaUrl, MIME_TS);
+            boolean pushed;
+            synchronized (transportLock) {
+                if (stopping.get() || !running.get()) {
+                    return "投屏已停止";
+                }
+                pushed = DlnaUpnp.play(renderer, mediaUrl, mimeType);
+                if (pushed && lowLatency && !stopping.get()) {
+                    String pushedUrl = mediaUrl;
+                    playbackMonitor = new DlnaPlaybackMonitor(renderer, pushedUrl, () -> {
+                        synchronized (transportLock) {
+                            if (stopping.get() || !running.get() || target != renderer
+                                    || !pushedUrl.equals(mediaUrl)) {
+                                return;
+                            }
+                            Log.w(TAG, "Receiver playback fell behind; rejoining live HLS via AVTransport");
+                            if (!DlnaUpnp.play(renderer, pushedUrl, mimeType)) {
+                                Log.w(TAG, "AVTransport live recovery failed");
+                            }
+                        }
+                    });
+                    playbackMonitor.start();
+                }
+            }
             if (!pushed) {
                 stop();
                 return "推送到「" + renderer.name + "」失败";
@@ -316,6 +369,19 @@ public class DlnaStreamer {
     }
 
     public void stop() {
+        if (!stopping.compareAndSet(false, true)) {
+            return;
+        }
+        DlnaPlaybackMonitor monitor = playbackMonitor;
+        playbackMonitor = null;
+        if (monitor != null) {
+            monitor.stop();
+        }
+        DlnaVideoSource source = videoSource;
+        videoSource = null;
+        if (source != null) {
+            source.stop();
+        }
         running.set(false);
 
         try {
@@ -327,8 +393,10 @@ public class DlnaStreamer {
         audioCapture = null;
 
         try {
-            if (target != null) {
-                DlnaUpnp.stop(target);
+            synchronized (transportLock) {
+                if (target != null) {
+                    DlnaUpnp.stop(target);
+                }
             }
         } catch (Exception ignored) {
         }
@@ -412,7 +480,7 @@ public class DlnaStreamer {
                 } catch (Exception ignored) {
                 }
                 try {
-                    Thread.sleep(1000);
+                    Thread.sleep(lowLatency ? 500 : 1000);
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -517,7 +585,7 @@ public class DlnaStreamer {
                     // 注意这里用的是「距上次真正发帧」的时间，真实帧发出后会刷新
                     // lastSentAt，所以补帧只在真空闲时发生，不会和真实帧叠加。
                     long now = System.currentTimeMillis();
-                    if (lastFrame != null && now - lastSentAt >= repeatTriggerMs) {
+                    if (!lowLatency && lastFrame != null && now - lastSentAt >= repeatTriggerMs) {
                         // 补帧不计入 videoFrameCount：那是「真实编码帧」的统计，
                         // 混进补帧会让帧率看起来比配置高，误导排查。
                         synchronized (muxer) {
@@ -605,7 +673,6 @@ public class DlnaStreamer {
             dm = context.getResources().getDisplayMetrics();
             dpi = dm.densityDpi > 0 ? dm.densityDpi : 320;
         }
-        // 编码器是 16:9，采集尺寸保持一致，避免缩放
-        return new int[]{WIDTH, HEIGHT, dpi};
+        return new int[]{lowLatency ? w : WIDTH, lowLatency ? h : HEIGHT, dpi};
     }
 }

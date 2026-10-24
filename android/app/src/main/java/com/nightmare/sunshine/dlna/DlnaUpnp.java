@@ -5,12 +5,14 @@ import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.StringReader;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,6 +21,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.xml.sax.InputSource;
+import org.xml.sax.helpers.DefaultHandler;
 
 /**
  * DLNA / UPnP 设备发现与 AVTransport 推送。
@@ -32,6 +42,12 @@ import java.util.regex.Pattern;
  */
 public class DlnaUpnp {
     private static final String TAG = "DlnaUpnp";
+    private static final String AV_TRANSPORT_SERVICE = "urn:schemas-upnp-org:service:AVTransport:1";
+    private static final String SOAP_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/";
+    private static final int QUERY_TIMEOUT_MS = 1500;
+    private static final int QUERY_BODY_LIMIT = 64 * 1024;
+    private static final Pattern REL_TIME = Pattern.compile(
+            "([0-9]+):([0-5][0-9]):([0-5][0-9])(?:\\.([0-9]+))?");
 
     private static final String SSDP_ADDR = "239.255.255.250";
     private static final int SSDP_PORT = 1900;
@@ -426,6 +442,189 @@ public class DlnaUpnp {
 
     public static boolean stop(Renderer r) {
         return soap(r, "Stop", "<InstanceID>0</InstanceID>");
+    }
+
+    public static final class PlaybackSnapshot {
+        public final String transportState;
+        public final long positionMs;
+        public final String mediaUri;
+
+        private PlaybackSnapshot(String transportState, long positionMs, String mediaUri) {
+            this.transportState = transportState;
+            this.positionMs = positionMs;
+            this.mediaUri = mediaUri;
+        }
+    }
+
+    public static PlaybackSnapshot getPlaybackSnapshot(Renderer renderer) {
+        String state = queryTransportState(renderer);
+        if (state == null) {
+            return null;
+        }
+        if (!"PLAYING".equals(state)) {
+            return new PlaybackSnapshot(state, -1, "");
+        }
+        Element position = queryResponse(renderer, "GetPositionInfo");
+        long positionMs = parseRelTimeMs(responseText(position, "RelTime"));
+        String mediaUri = responseText(position, "TrackURI");
+        if (positionMs < 0 || mediaUri == null) {
+            return null;
+        }
+        if (mediaUri.isEmpty()) {
+            mediaUri = responseText(queryResponse(renderer, "GetMediaInfo"), "CurrentURI");
+        }
+        if (mediaUri == null || mediaUri.isEmpty() || "NOT_IMPLEMENTED".equals(mediaUri)) {
+            return null;
+        }
+        state = queryTransportState(renderer);
+        return state == null ? null : new PlaybackSnapshot(state, positionMs, mediaUri);
+    }
+
+    private static String queryTransportState(Renderer renderer) {
+        Element transport = queryResponse(renderer, "GetTransportInfo");
+        String state = responseText(transport, "CurrentTransportState");
+        if (state == null || state.isEmpty()
+                || !"OK".equals(responseText(transport, "CurrentTransportStatus"))
+                || !"1".equals(responseText(transport, "CurrentSpeed"))) {
+            return null;
+        }
+        return state;
+    }
+
+    private static Element queryResponse(Renderer renderer, String action) {
+        if (renderer == null || renderer.avTransportControlUrl == null
+                || renderer.avTransportControlUrl.isEmpty() || Thread.currentThread().isInterrupted()) {
+            return null;
+        }
+        HttpURLConnection connection = null;
+        long deadline = System.nanoTime() + QUERY_TIMEOUT_MS * 1_000_000L;
+        try {
+            connection = (HttpURLConnection) new URL(renderer.avTransportControlUrl).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(QUERY_TIMEOUT_MS);
+            connection.setReadTimeout(QUERY_TIMEOUT_MS);
+            connection.setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"");
+            connection.setRequestProperty("SOAPACTION", "\"" + AV_TRANSPORT_SERVICE + "#" + action + "\"");
+            String body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                    + "<s:Envelope xmlns:s=\"" + SOAP_NAMESPACE
+                    + "\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+                    + "<s:Body><u:" + action + " xmlns:u=\"" + AV_TRANSPORT_SERVICE + "\">"
+                    + "<InstanceID>0</InstanceID></u:" + action + "></s:Body></s:Envelope>";
+            byte[] payload = body.getBytes("UTF-8");
+            connection.setFixedLengthStreamingMode(payload.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(payload);
+            }
+            connection.setReadTimeout(queryTimeLeft(deadline));
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300 || connection.getContentLength() > QUERY_BODY_LIMIT) {
+                return null;
+            }
+            try (InputStream input = connection.getInputStream()) {
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                byte[] buffer = new byte[2048];
+                while (!Thread.currentThread().isInterrupted()) {
+                    connection.setReadTimeout(queryTimeLeft(deadline));
+                    int count = input.read(buffer);
+                    if (count < 0) {
+                        queryTimeLeft(deadline);
+                        return parseQueryResponse(bytes.toString("UTF-8"), action);
+                    }
+                    if (bytes.size() + count > QUERY_BODY_LIMIT) {
+                        return null;
+                    }
+                    bytes.write(buffer, 0, count);
+                }
+            }
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+        return null;
+    }
+
+    private static int queryTimeLeft(long deadline) throws SocketTimeoutException {
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0 || Thread.currentThread().isInterrupted()) {
+            throw new SocketTimeoutException("UPnP query cancelled or timed out");
+        }
+        return (int) Math.max(1, remaining / 1_000_000L);
+    }
+
+    private static Element parseQueryResponse(String xml, String action) throws Exception {
+        if (xml.toUpperCase(Locale.ROOT).contains("<!DOCTYPE")) {
+            return null;
+        }
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        factory.setExpandEntityReferences(false);
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        builder.setEntityResolver((publicId, systemId) -> new InputSource(new StringReader("")));
+        builder.setErrorHandler(new DefaultHandler());
+        Element envelope = builder.parse(new InputSource(new StringReader(xml))).getDocumentElement();
+        if (!"Envelope".equals(envelope.getLocalName()) || !SOAP_NAMESPACE.equals(envelope.getNamespaceURI())) {
+            return null;
+        }
+        Element body = responseChild(envelope, "Body", SOAP_NAMESPACE);
+        if (responseChild(body, "Fault", SOAP_NAMESPACE) != null) {
+            return null;
+        }
+        return responseChild(body, action + "Response", AV_TRANSPORT_SERVICE);
+    }
+
+    private static Element responseChild(Element parent, String name, String namespace) {
+        if (parent == null) {
+            return null;
+        }
+        Element result = null;
+        for (Node child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
+            if (child.getNodeType() != Node.ELEMENT_NODE || !name.equals(child.getLocalName())) {
+                continue;
+            }
+            String actualNamespace = child.getNamespaceURI();
+            boolean validNamespace = namespace == null
+                    ? actualNamespace == null || actualNamespace.isEmpty() || AV_TRANSPORT_SERVICE.equals(actualNamespace)
+                    : namespace.equals(actualNamespace);
+            if (!validNamespace || result != null) {
+                return null;
+            }
+            result = (Element) child;
+        }
+        return result;
+    }
+
+    private static String responseText(Element response, String name) {
+        Element value = responseChild(response, name, null);
+        if (value == null || value.getElementsByTagName("*").getLength() != 0) {
+            return null;
+        }
+        return value.getTextContent().trim();
+    }
+
+    private static long parseRelTimeMs(String time) {
+        if (time == null) {
+            return -1;
+        }
+        Matcher match = REL_TIME.matcher(time);
+        if (!match.matches()) {
+            return -1;
+        }
+        try {
+            long hours = Long.parseLong(match.group(1));
+            long remainder = Long.parseLong(match.group(2)) * 60000L + Long.parseLong(match.group(3)) * 1000L;
+            String fraction = match.group(4);
+            if (fraction != null) {
+                remainder += Long.parseLong((fraction + "000").substring(0, 3));
+            }
+            return hours > (Long.MAX_VALUE - remainder) / 3600000L ? -1 : hours * 3600000L + remainder;
+        } catch (NumberFormatException invalid) {
+            return -1;
+        }
     }
 
     /** 标准 DIDL-Lite 元数据。缺了它不少接收端会拒绝播放。 */

@@ -8,6 +8,11 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Locale;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * 极简 HTTP 服务器，只做一件事：把一个「不断变长」的 TS 流喂给 DLNA 接收端。
@@ -89,12 +94,25 @@ public class DlnaHttpServer {
     /** 累计写入的总字节数（单调递增），用它换算环形缓冲区的绝对偏移 */
     private long totalWritten;
     private final Object lock = new Object();
+    private static final int MAX_HLS_RESPONSES = 4;
+    private static final long HLS_WRITE_TIMEOUT_NANOS = 5_000_000_000L;
+    private final DlnaHlsStore hls;
+    private final Semaphore hlsSlots = new Semaphore(MAX_HLS_RESPONSES);
+    private final java.util.Map<Socket, Long> hlsDeadlines = new java.util.concurrent.ConcurrentHashMap<>();
+    private ScheduledExecutorService hlsWatchdog;
+    private final java.util.Map<String, Long> hlsClients =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private int port;
     private final String contentType;
 
     public DlnaHttpServer(String contentType) {
+        this(contentType, System::nanoTime);
+    }
+
+    DlnaHttpServer(String contentType, LongSupplier nanoClock) {
         this.contentType = contentType;
+        hls = new DlnaHlsStore(nanoClock);
     }
 
     public int getPort() {
@@ -112,6 +130,13 @@ public class DlnaHttpServer {
         port = serverSocket.getLocalPort();
         running = true;
 
+        hlsWatchdog = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "DlnaHlsDeadline");
+            thread.setDaemon(true);
+            return thread;
+        });
+        hlsWatchdog.scheduleAtFixedRate(this::expireHlsWrites, 100, 100, TimeUnit.MILLISECONDS);
+
         acceptThread = new Thread(this::acceptLoop, "DlnaHttpAccept");
         acceptThread.setDaemon(true);
         acceptThread.start();
@@ -122,6 +147,9 @@ public class DlnaHttpServer {
 
     public void stop() {
         running = false;
+        hls.stop();
+        hlsClients.clear();
+        if (hlsWatchdog != null) { hlsWatchdog.shutdownNow(); }
         synchronized (lock) { lock.notifyAll(); }
         for (Socket socket : sockets) {
             try { socket.close(); } catch (IOException ignored) {}
@@ -183,6 +211,7 @@ public class DlnaHttpServer {
             return;
         }
         synchronized (lock) {
+            hls.append(data, keyframe);
             if (keyframe) { markKeyframe(); }
             int offset = 0;
             while (offset < data.length) {
@@ -238,7 +267,9 @@ public class DlnaHttpServer {
 
     /** 当前活跃的 HTTP 连接数。0 表示接收端没在拉流。 */
     public int clientCount() {
-        return connCursors.size();
+        long cutoff = System.currentTimeMillis() - 3000;
+        hlsClients.entrySet().removeIf(entry -> entry.getValue() < cutoff);
+        return connCursors.size() + hlsClients.size();
     }
 
     /** 最近一次有数据发出的时刻（毫秒） */
@@ -321,6 +352,26 @@ public class DlnaHttpServer {
 
             Log.i(TAG, "请求 " + requestLine + " from " + remote
                     + (rangeHeader != null ? " Range=" + rangeHeader : ""));
+
+            String[] requestParts = requestLine.split(" ", 3);
+            if (requestParts.length < 2) {
+                finiteError(out, "400 Bad Request", false, "");
+                return;
+            }
+            boolean headOnly = "HEAD".equals(requestParts[0]);
+            if (!headOnly && !"GET".equals(requestParts[0])) {
+                finiteError(out, "405 Method Not Allowed", false, "Allow: GET, HEAD\r\n");
+                return;
+            }
+            String path = requestParts[1].split("\\?", 2)[0];
+            if ("/live.m3u8".equals(path) || (path.startsWith("/segment-") && path.endsWith(".ts"))) {
+                handleHls(socket, out, path, headOnly, rangeHeader);
+                return;
+            }
+            if (!"/live.ts".equals(path)) {
+                finiteError(out, "404 Not Found", headOnly, "");
+                return;
+            }
 
             long requestedStart = 0;
             long requestedEnd = Long.MAX_VALUE;
@@ -419,6 +470,105 @@ public class DlnaHttpServer {
             } catch (IOException ignored) {
             }
         }
+    }
+
+    private void expireHlsWrites() {
+        long now = System.nanoTime();
+        for (java.util.Map.Entry<Socket, Long> entry : hlsDeadlines.entrySet()) {
+            if (now - entry.getValue() >= 0 && hlsDeadlines.remove(entry.getKey(), entry.getValue())) {
+                try { entry.getKey().close(); } catch (IOException ignored) { }
+            }
+        }
+    }
+
+    private void handleHls(Socket socket, OutputStream out, String path, boolean headOnly,
+                           String rangeHeader) throws IOException, InterruptedException {
+        if (!hlsSlots.tryAcquire()) {
+            finiteError(out, "503 Service Unavailable", headOnly, "Retry-After: 1\r\n");
+            return;
+        }
+        try {
+            if (!running) { return; }
+            boolean playlist = "/live.m3u8".equals(path);
+            byte[] body = null;
+            if (playlist) {
+                body = hls.awaitPlaylist(5000);
+            } else {
+                try {
+                    body = hls.segment(Long.parseLong(path.substring(9, path.length() - 3)));
+                } catch (NumberFormatException ignored) { }
+            }
+            hlsDeadlines.put(socket, System.nanoTime() + HLS_WRITE_TIMEOUT_NANOS);
+            if (body == null) {
+                finiteError(out, playlist ? "503 Service Unavailable" : "404 Not Found", headOnly,
+                        playlist ? "Retry-After: 1\r\n" : "");
+            } else {
+                serveHls(out, body, playlist ? DlnaHlsStore.MIME_TYPE : contentType, headOnly,
+                        playlist ? null : rangeHeader, socket.getInetAddress().getHostAddress());
+            }
+        } finally {
+            hlsDeadlines.remove(socket);
+            hlsSlots.release();
+        }
+    }
+
+    private void serveHls(OutputStream out, byte[] body, String mime, boolean headOnly,
+                          String rangeHeader, String client) throws IOException {
+        int start = 0;
+        int end = body.length;
+        String status = "200 OK";
+        String extra = "Accept-Ranges: " + (DlnaHlsStore.MIME_TYPE.equals(mime) ? "none" : "bytes") + "\r\n";
+        if (!headOnly && rangeHeader != null && rangeHeader.startsWith("bytes=") && !rangeHeader.contains(",")) {
+            String spec = rangeHeader.substring(6).trim();
+            int dash = spec.indexOf('-');
+            try {
+                if (dash < 0) { throw new NumberFormatException(); }
+                long first;
+                long last;
+                if (dash == 0) {
+                    long suffix = Long.parseLong(spec.substring(1));
+                    if (suffix <= 0) { throw new NumberFormatException(); }
+                    first = Math.max(0, body.length - suffix);
+                    last = body.length - 1;
+                } else {
+                    first = Long.parseLong(spec.substring(0, dash));
+                    last = dash + 1 == spec.length() ? body.length - 1
+                            : Long.parseLong(spec.substring(dash + 1));
+                }
+                if (first < 0 || first >= body.length || last < first) { throw new NumberFormatException(); }
+                start = (int)first;
+                end = (int)Math.min(last, body.length - 1) + 1;
+                status = "206 Partial Content";
+                extra += "Content-Range: bytes " + start + "-" + (end - 1) + "/" + body.length + "\r\n";
+            } catch (NumberFormatException error) {
+                finiteError(out, "416 Range Not Satisfiable", headOnly,
+                        "Content-Range: bytes */" + body.length + "\r\n");
+                return;
+            }
+        }
+        finiteResponse(out, status, mime, body, start, end - start, headOnly, extra);
+        if (!headOnly) {
+            servedBytes.addAndGet(end - start);
+            lastServedAt = System.currentTimeMillis();
+            hlsClients.put(client, lastServedAt);
+        }
+    }
+
+    private static void finiteError(OutputStream out, String status, boolean headOnly,
+                                    String extra) throws IOException {
+        byte[] body = (status + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        finiteResponse(out, status, "text/plain; charset=utf-8", body, 0, body.length, headOnly, extra);
+    }
+
+    private static void finiteResponse(OutputStream out, String status, String mime, byte[] body,
+                                       int offset, int length, boolean headOnly, String extra) throws IOException {
+        String headers = "HTTP/1.1 " + status + "\r\nContent-Type: " + mime
+                + "\r\nContent-Length: " + length + "\r\n" + extra
+                + "transferMode.dlna.org: Streaming\r\nCache-Control: no-cache, no-store\r\n"
+                + "Connection: close\r\n\r\n";
+        out.write(headers.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        if (!headOnly) { out.write(body, offset, length); }
+        out.flush();
     }
 
     /** 从指定绝对偏移开始，把环形缓冲区里的数据持续推给客户端。 */
