@@ -21,8 +21,7 @@ final class DlnaHlsStore {
     // the receiver: a 1.5-second window made its player fall ~7s behind with
     // a frozen picture, and the old 4-second window measured ~4.3s.
     private static final long PLAYLIST_TICKS = 180_000;
-    private static final long MIN_PLAYLIST_TICKS = 162_000;
-    private static final int MAX_SEGMENT_BYTES = 2 * 1024 * 1024;
+    private static final long MIN_PLAYLIST_TICKS = 162_000;    private static final int MAX_SEGMENT_BYTES = 2 * 1024 * 1024;
     private static final int MAX_HISTORY_BYTES = 8 * 1024 * 1024;
     private static final int MAX_SEGMENTS = 40;
     // Sender-side stalls (encoder hiccups, epoch republish gaps, capacity

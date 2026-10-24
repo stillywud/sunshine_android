@@ -146,6 +146,11 @@ public class DlnaTsMuxer {
         packet[11] = 0;
     }
 
+    /** PCR 相对 PTS 的前移量:与 FFmpeg HLS 的 0.7s 一致,给播放器的
+     *  缓冲算法(1.2.8 的 AbrBufferAlgoStrategy 按缓冲超前量决定起播)留出
+     *  正的缓冲余量。PCR==PTS 时缓冲超前恒为零,1.2.8 永远等不到起播条件。 */
+    private static final long PCR_LEAD_TICKS = 63_000L;
+
     public DlnaTsMuxer(int fps, boolean hasAudio) {
         this(fps, hasAudio, 48_000);
     }
@@ -243,6 +248,12 @@ public class DlnaTsMuxer {
         // 播放器随时可能中途接入或断线重连，所以每个关键帧前都重发 PAT/PMT，
         // 让它无论从哪一帧开始都能立刻拿到节目表和流类型。
         if (keyFrame) {
+            // 每个分片对"按分片解析"的播放器(如 1.2.8 接收端)是独立文件:
+            // PSI 与所有 PID 的 CC 都从 0 重新计数,与 FFmpeg 的 HLS 分段行为
+            // 一致;跨分片延续的 CC 会被这类播放器当作流损坏。PSI 顺序也复制
+            // FFmpeg:SDT → PAT → PMT。
+            java.util.Arrays.fill(continuity, (byte) 0);
+            writeSdt();
             writePat();
             writePmt();
             patPmtWritten = true;
@@ -421,6 +432,27 @@ public class DlnaTsMuxer {
         writeSection(PID_PAT, withCrc, 0x00);
     }
 
+    /**
+     * SDT(服务描述表,PID 0x11)。1.2.8 接收端播放器的 HLS 分片解复用器在
+     * prepare 阶段对 PSI 集合的完整性有要求:对照实验里,同一批编码字节经
+     * FFmpeg 打包(带 SDT)可瞬间 Prepared,经我们的打包(无 SDT)永远停在
+     * 加载。此表为 FFmpeg 生成的字节模板(transport_stream_id/service_id = 1,
+     * 服务名 Service01),含 CRC,原样复制。
+     */
+    private static final byte[] SDT_SECTION = {
+            0x42, (byte) 0xF0, 0x25,
+            0x00, 0x01, (byte) 0xC1, 0x00, 0x00,
+            (byte) 0xFF, 0x01, (byte) 0xFF, 0x00,
+            0x01, (byte) 0xFC, (byte) 0x80, 0x14,
+            0x48, 0x12, 0x01, 0x06,
+            0x46, 0x46, 0x6D, 0x70, 0x65, 0x67,
+            0x09, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x30, 0x31,
+            0x77, 0x7C, 0x43, (byte) 0xCA};
+
+    private void writeSdt() {
+        writeSection(0x0011, SDT_SECTION, 0x42);
+    }
+
     private void writePmt() {
         ByteArrayOutputStream sec = new ByteArrayOutputStream();
         sec.write(0x02);                  // table_id: program_map_section
@@ -535,10 +567,16 @@ public class DlnaTsMuxer {
     private void writePesPayload(int pid, byte[] data, long pcrBase, boolean keyFrame) {
         int offset = 0;
         boolean first = true;
+        // 1.2.8 接收端播放器的解复用器只认"起始包带适配域"的 PES:视频 PES
+        // 首包天然带 PCR 适配域,而音频 PES 首包若裸载荷(afc=1)会被整个
+        // 跳过——音频时钟建立不起来,A/V 同步等待直至 30 秒加载超时。FFmpeg
+        // 打包的音频 PES 起始包因此总带 1 字节适配域填充,这里保持一致。
+        boolean audioLeadPad = pcrBase < 0 && pid == PID_AUDIO;
         while (offset < data.length) {
             boolean withPcr = first && pcrBase >= 0;
-            // adaptation_field_length + flags + 6-byte PCR require 8 bytes.
-            int capacity = PAYLOAD_CAPACITY - (withPcr ? 8 : 0);
+            boolean withLeadPad = first && audioLeadPad;
+            // adaptation_field_length + flags (+ 6-byte PCR) require 8 bytes.
+            int capacity = PAYLOAD_CAPACITY - (withPcr ? 8 : 0) - (withLeadPad ? 2 : 0);
             int n = Math.min(capacity, data.length - offset);
 
             byte[] packet = new byte[TS_PACKET_SIZE];
@@ -546,7 +584,7 @@ public class DlnaTsMuxer {
             packet[1] = (byte) ((first ? 0x40 : 0x00) | ((pid >> 8) & 0x1F));
             packet[2] = (byte) (pid & 0xFF);
 
-            if (withPcr || n < PAYLOAD_CAPACITY) {
+            if (withPcr || withLeadPad || n < PAYLOAD_CAPACITY) {
                 // 用 adaptation field 补齐，避免浪费
                 int stuffing = PAYLOAD_CAPACITY - n - 1;
                 packet[3] = (byte) (0x30 | (continuity[pid] & 0x0F)); // AF + payload
@@ -557,7 +595,7 @@ public class DlnaTsMuxer {
                         packet[i] = (byte) 0xFF;
                     }
                     if (withPcr) {
-                        writePcr(packet, pcrBase);
+                        writePcr(packet, pcrBase - PCR_LEAD_TICKS);
                     }
                 }
                 System.arraycopy(data, offset, packet,

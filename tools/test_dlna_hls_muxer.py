@@ -72,7 +72,18 @@ public class HlsMuxerRegression {
                     count++;
                 }
             }
-            if (count < 6) throw new AssertionError("too few independently decodable segments: " + count);
+            if (count < 6) {
+                for (String line : published) {
+                    byte[] body;
+                    try (InputStream in = new URL(base + line).openStream()) {
+                        body = in.readAllBytes();
+                    }
+                    System.out.println("DBG " + line + " len=" + body.length
+                            + " b0=" + (body.length > 0 ? (body[0] & 255) : -1)
+                            + " b188=" + (body.length > 188 ? (body[188] & 255) : -1));
+                }
+                throw new AssertionError("too few independently decodable segments: " + count);
+            }
             System.out.println("PASS actual muxer interleaves IDR/P-frame/AAC bytes across " + count + " HTTP segments");
         } finally { server.stop(); }
     }

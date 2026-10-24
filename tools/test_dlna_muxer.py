@@ -51,10 +51,10 @@ public class MuxRegression {
         long videoPts = (((p[9] >> 1) & 7L) << 30) | ((p[10] & 255L) << 22)
             | (((p[11] >> 1) & 127L) << 15) | ((p[12] & 255L) << 7)
             | ((p[13] >> 1) & 127L);
-        // PCR must share the media clock: a wall-clock PCR drifts away from PTS
-        // on every encoder stall and the 1.2.8 receiver player chases it with
-        // visible skips until its 30s loading timeout.
-        if (Math.abs(previousPcr - videoPts) > 90)
+        // PCR must share the media clock AND sit 0.7s ahead-of-PTS behind it:
+        // the 1.2.8 receiver's buffer algorithm gates startup on buffered-ahead
+        // time, which is positive only when PCR trails PTS.
+        if (Math.abs(previousPcr - (videoPts - 63_000L)) > 90)
             throw new AssertionError("PCR " + previousPcr + " is not media-aligned with PTS " + videoPts);
         int payload = 9 + (p[8] & 255);
         byte[] aud = {0,0,0,1,9,(byte)0xf0};
