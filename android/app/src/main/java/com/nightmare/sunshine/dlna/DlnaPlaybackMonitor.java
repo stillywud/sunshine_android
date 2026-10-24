@@ -9,8 +9,9 @@ public final class DlnaPlaybackMonitor {
     private static final long POLL_MS = 2000;
 
     private final Renderer renderer;
-    private final String expectedUrl;
+    private volatile String expectedUrl;
     private final Runnable onDrift;
+    private volatile DriftTracker tracker;
     private volatile Thread worker;
 
     public DlnaPlaybackMonitor(Renderer renderer, String expectedUrl, Runnable onDrift) {
@@ -20,6 +21,54 @@ public final class DlnaPlaybackMonitor {
         this.renderer = renderer;
         this.expectedUrl = expectedUrl;
         this.onDrift = onDrift;
+    }
+
+    /**
+     * Live recovery re-pushes the stream under a varied URL. The receiver may
+     * report either form, so match on the query-insensitive key and keep the
+     * tracker's expectation in step with what was actually pushed.
+     */
+    public synchronized void updateExpectedUrl(String url) {
+        if (url == null || url.isEmpty()) {
+            return;
+        }
+        expectedUrl = url;
+        DriftTracker current = tracker;
+        if (current != null) {
+            current.updateExpectedUrl(url);
+        }
+    }
+
+    /**
+     * Recovery re-pushes vary only the throwaway "r" query parameter; any
+     * other query difference (or path difference) is genuinely different
+     * content. Compare on the URI minus that parameter.
+     */
+    static String mediaUriKey(String uri) {
+        if (uri == null) {
+            return null;
+        }
+        int query = uri.indexOf('?');
+        if (query < 0) {
+            return uri;
+        }
+        String base = uri.substring(0, query);
+        StringBuilder kept = new StringBuilder();
+        for (String pair : uri.substring(query + 1).split("&")) {
+            if (pair.isEmpty() || pair.equals("r") || pair.startsWith("r=")) {
+                continue;
+            }
+            if (kept.length() > 0) {
+                kept.append('&');
+            }
+            kept.append(pair);
+        }
+        return kept.length() == 0 ? base : base + '?' + kept;
+    }
+
+    static boolean sameMediaUri(String reported, String expected) {
+        String reportedKey = mediaUriKey(reported);
+        return reportedKey != null && reportedKey.equals(mediaUriKey(expected));
     }
 
     public synchronized void start() {
@@ -44,7 +93,8 @@ public final class DlnaPlaybackMonitor {
     }
 
     private void monitor() {
-        DriftTracker tracker = new DriftTracker(expectedUrl);
+        DriftTracker localTracker = new DriftTracker(expectedUrl);
+        tracker = localTracker;
         long started = System.nanoTime();
         try {
             while (isRunning()) {
@@ -54,12 +104,12 @@ public final class DlnaPlaybackMonitor {
                     break;
                 }
                 long nowMs = (System.nanoTime() - started) / 1_000_000L;
-                if (tracker.observe(nowMs, snapshot == null ? null : snapshot.transportState,
+                if (localTracker.observe(nowMs, snapshot == null ? null : snapshot.transportState,
                         snapshot == null ? -1 : snapshot.positionMs, snapshot == null ? null : snapshot.mediaUri)) {
                     PlaybackSnapshot confirmed = DlnaUpnp.getPlaybackSnapshot(renderer);
                     if (confirmed != null && "PLAYING".equals(confirmed.transportState)
                             && confirmed.positionMs >= snapshot.positionMs
-                            && expectedUrl.equals(confirmed.mediaUri)
+                            && sameMediaUri(confirmed.mediaUri, localTracker.expectedUrl())
                             && isRunning()) {
                         onDrift.run();
                     }
@@ -77,6 +127,9 @@ public final class DlnaPlaybackMonitor {
                 if (worker == Thread.currentThread()) {
                     worker = null;
                 }
+                if (tracker == localTracker) {
+                    tracker = null;
+                }
             }
         }
     }
@@ -86,7 +139,7 @@ public final class DlnaPlaybackMonitor {
         private static final long DRIFT_MS = 2000;
         private static final long COOLDOWN_MS = 20000;
 
-        private final String expectedUrl;
+        private String expectedUrl;
         private boolean initialized;
         private boolean advancing;
         private boolean stabilized;
@@ -103,9 +156,17 @@ public final class DlnaPlaybackMonitor {
             this.expectedUrl = expectedUrl;
         }
 
+        void updateExpectedUrl(String url) {
+            this.expectedUrl = url;
+        }
+
+        String expectedUrl() {
+            return expectedUrl;
+        }
+
         boolean observe(long nowMs, String state, long positionMs, String mediaUri) {
             if (mediaUri != null && !mediaUri.isEmpty()) {
-                if (!mediaUri.equals(expectedUrl)) {
+                if (!sameMediaUri(mediaUri, expectedUrl)) {
                     foreignMedia = true;
                     reset();
                     return false;

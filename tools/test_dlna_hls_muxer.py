@@ -28,6 +28,8 @@ public class HlsMuxerRegression {
         muxer.setVideoCodecConfig(Files.readAllBytes(directory.resolve("config.h264")));
         DlnaHttpServer server = new DlnaHttpServer("video/mp2t");
         server.start(0);
+        String base = "http://127.0.0.1:" + server.getPort() + "/";
+        Set<String> published = new LinkedHashSet<>();
         java.lang.reflect.Field epoch = DlnaTsMuxer.class.getDeclaredField("epochUs");
         epoch.setAccessible(true);
         try (DataInputStream video = new DataInputStream(Files.newInputStream(directory.resolve("video.bin")));
@@ -47,12 +49,14 @@ public class HlsMuxerRegression {
                     server.write(muxer.pushAudioRaw(audioFrames.get(audioIndex++), false, capture));
                 }
                 videoIndex++;
+                // Refresh like a receiver: the advertised live window is
+                // bounded, so distinct segments accumulate across polls.
+                if (videoIndex % 25 == 0) collectSegments(base, published);
             }
-            String base = "http://127.0.0.1:" + server.getPort() + "/";
-            String playlist;
-            try (InputStream input = new URL(base + "live.m3u8").openStream()) {
-                playlist = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-            }
+            collectSegments(base, published);
+            StringBuilder playlistBuilder = new StringBuilder("#EXTM3U\n");
+            for (String name : published) playlistBuilder.append(name).append('\n');
+            String playlist = playlistBuilder.toString();
             Files.writeString(directory.resolve("playlist.m3u8"), playlist);
             int count = 0;
             for (String line : playlist.split("\n")) {
@@ -71,6 +75,23 @@ public class HlsMuxerRegression {
             if (count < 6) throw new AssertionError("too few independently decodable segments: " + count);
             System.out.println("PASS actual muxer interleaves IDR/P-frame/AAC bytes across " + count + " HTTP segments");
         } finally { server.stop(); }
+    }
+
+    static void collectSegments(String base, Set<String> seen) throws Exception {
+        // A real receiver tolerates "no usable live window yet" responses and
+        // retries, so collection simply skips them.
+        try {
+            java.net.HttpURLConnection connection =
+                    (java.net.HttpURLConnection)new URL(base + "live.m3u8").openConnection();
+            int code = connection.getResponseCode();
+            if (code != 200) { return; }
+            for (String line : new String(connection.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                if (!line.isEmpty() && !line.startsWith("#")) seen.add(line.trim());
+            }
+        } catch (IOException retryable) {
+            // retry on the next poll
+        }
     }
 }
 '''

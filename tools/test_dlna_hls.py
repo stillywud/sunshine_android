@@ -117,7 +117,7 @@ public class HlsRegression {
     }
     static void populateLarge(DlnaHttpServer server, int first, int count) {
         for (int index = first; index < first + count; index++) {
-            byte[] bytes = Arrays.copyOf(frame(90000 + index * 45000L, index), 188 * 5577);
+            byte[] bytes = Arrays.copyOf(frame(90000 + index * 45000L, index), 188 * 999);
             server.write(bytes, true);
         }
     }
@@ -155,7 +155,7 @@ public class HlsRegression {
     }
     public static void main(String[] args) throws Exception {
         Map<String, Checked> cases = new LinkedHashMap<>();
-        cases.put("playlist has stable one-second target and at least three seconds of complete segments", () -> {
+        cases.put("playlist has stable one-second target and a bounded low-latency window", () -> {
             DlnaHttpServer server = server();
             try {
                 populate(server, 0, 18, 90000);
@@ -172,7 +172,7 @@ public class HlsRegression {
                         duration += value;
                     }
                 }
-                if (duration < 3 || duration > 5) throw new AssertionError("bad live window " + duration);
+                if (duration < 1.8 || duration > 2.6) throw new AssertionError("bad live window " + duration);
                 List<String> paths = segmentPaths(body);
                 for (int index = 1; index < paths.size(); index++) {
                     if (sequence(paths.get(index)) != sequence(paths.get(index - 1)) + 1) {
@@ -263,13 +263,13 @@ public class HlsRegression {
                         byte[] bytes = availablePlaylist(server);
                         if (bytes == null) throw new AssertionError("ordinary bitrate exhausted retention capacity");
                         String body = new String(bytes, StandardCharsets.UTF_8);
-                        if (segmentPaths(body).size() < 6 || !body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n")) {
+                        if (segmentPaths(body).size() < 3 || !body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n")) {
                             throw new AssertionError("ordinary bitrate lost its continuous playable window");
                         }
                     }
                     Object store = field(server, "hls");
                     if ((int)field(store, "retainedBytes") > 8 * 1024 * 1024
-                            || ((Collection<?>)field(store, "segments")).size() > 32) {
+                            || ((Collection<?>)field(store, "segments")).size() > 40) {
                         throw new AssertionError("steady publication exceeded its history bound");
                     }
                 }
@@ -282,10 +282,10 @@ public class HlsRegression {
                 for (int index = 0; index < 4; index++) server.write(frame(90000 + index * 126000L, index), true);
                 String oldest = segmentPaths(playlist(server)).get(0);
                 server.write(frame(90000 + 4 * 126000L, 4), true);
-                clocks.get(server).addAndGet(5_599_999_999L);
+                clocks.get(server).addAndGet(14_199_999_999L);
                 for (int index = 5; index < 46; index++) server.write(frame(90000 + index * 126000L, index), true);
                 if (!request(server, "HEAD", oldest, "").headers.startsWith("HTTP/1.1 200")) {
-                    throw new AssertionError("4.2-second playlist plus 1.4-second segment grace was shortened");
+                    throw new AssertionError("2.8-second playlist, 1.4-second segment and 10-second slack grace was shortened");
                 }
                 clocks.get(server).incrementAndGet();
                 for (int index = 46; index < 52; index++) server.write(frame(90000 + index * 126000L, index), true);
@@ -294,41 +294,42 @@ public class HlsRegression {
                 }
             } finally { server.stop(); }
         });
-        cases.put("byte pressure preserves promised segments and refuses an incomplete live window", () -> {
+        cases.put("sustained catch-up backlog keeps publishing with bounded promised history", () -> {
             DlnaHttpServer server = server();
             try {
                 populateLarge(server, 0, 9);
-                List<String> promised = segmentPaths(playlist(server));
-                populateLarge(server, 9, 24);
+                String before = playlist(server);
+                List<String> promised = segmentPaths(before);
+                populateLarge(server, 9, 30);
                 for (String path : promised) {
                     Response response = request(server, "GET", path, "Range: bytes=0-563\r\n");
                     if (!response.headers.startsWith("HTTP/1.1 206")
                             || !Arrays.equals(response.body, frame(90000 + sequence(path) * 45000L, (int)sequence(path)))) {
-                        throw new AssertionError("byte pressure evicted or changed promised " + path);
+                        throw new AssertionError("backlog evicted or changed promised " + path);
                     }
                 }
                 if ((int)field(field(server, "hls"), "retainedBytes") > 8 * 1024 * 1024) {
                     throw new AssertionError("retention exceeded 8 MiB");
                 }
-                if (availablePlaylist(server) != null) throw new AssertionError("capacity fault advertised live media");
-                Response unavailable = request(server, "HEAD", "/live.m3u8", "");
-                if (!unavailable.headers.startsWith("HTTP/1.1 503") || unavailable.body.length != 0
-                        || !unavailable.headers.contains("Retry-After: 1")) {
-                    throw new AssertionError("capacity fault did not produce a controlled HTTP error");
+                String grown = playlist(server);
+                List<String> grownPaths = segmentPaths(grown);
+                if (grownPaths.size() < 3
+                        || sequence(grownPaths.get(grownPaths.size() - 1))
+                            <= sequence(promised.get(promised.size() - 1))) {
+                    throw new AssertionError("catch-up backlog froze live publication");
                 }
-                clocks.get(server).addAndGet(4_499_999_999L);
-                populateLarge(server, 33, 2);
+                clocks.get(server).addAndGet(12_499_999_999L);
                 if (!request(server, "HEAD", promised.get(0), "").headers.startsWith("HTTP/1.1 200")) {
-                    throw new AssertionError("retirement grace ended before 4.5 seconds");
+                    throw new AssertionError("retirement grace ended before 12.5 seconds");
                 }
                 clocks.get(server).incrementAndGet();
-                populateLarge(server, 35, 12);
+                populateLarge(server, 41, 10);
                 if (!request(server, "GET", promised.get(0), "").headers.startsWith("HTTP/1.1 404")) {
                     throw new AssertionError("expired promises prevented capacity recovery");
                 }
                 String recovered = playlist(server);
-                if (segmentPaths(recovered).size() < 6 || !recovered.contains("#EXT-X-DISCONTINUITY")) {
-                    throw new AssertionError("capacity recovery lost its usable window or discontinuity");
+                if (segmentPaths(recovered).size() < 3) {
+                    throw new AssertionError("capacity recovery lost its usable window");
                 }
             } finally { server.stop(); }
         });
@@ -339,18 +340,18 @@ public class HlsRegression {
                 String oldest = segmentPaths(playlist(server)).get(0);
                 clocks.get(server).addAndGet(3_000_000_000L);
                 populate(server, 12, 1, 90000);
-                clocks.get(server).addAndGet(4_499_999_999L);
-                populate(server, 13, 150, 90000);
+                clocks.get(server).addAndGet(12_499_999_999L);
+                populate(server, 13, 20, 90000);
                 if (!request(server, "GET", oldest, "").headers.startsWith("HTTP/1.1 200")) {
                     throw new AssertionError("media advancement or advertisement age shortened retirement grace");
                 }
                 clocks.get(server).incrementAndGet();
-                populate(server, 163, 40, 90000);
+                populate(server, 33, 30, 90000);
                 if (!request(server, "GET", oldest, "").headers.startsWith("HTTP/1.1 404")) {
                     throw new AssertionError("retired history did not become reclaimable");
                 }
                 clocks.get(server).addAndGet(5_000_000_000L);
-                populate(server, 203, 12, 90000);
+                populate(server, 47, 12, 90000);
                 playlist(server);
             } finally { server.stop(); }
         });
@@ -374,7 +375,7 @@ public class HlsRegression {
                     throw new AssertionError("recently removed segment evicted too early");
                 }
                 populate(server, 26, 2, 90000);
-                clocks.get(server).addAndGet(6_000_000_000L);
+                clocks.get(server).addAndGet(12_999_999_999L);
                 populate(server, 28, 148, 90000);
                 if (!request(server, "GET", oldPath, "").headers.startsWith("HTTP/1.1 404")) {
                     throw new AssertionError("unbounded segment history");
@@ -386,7 +387,15 @@ public class HlsRegression {
             DlnaHttpServer server = server();
             try {
                 populate(server, 0, 10, 90000);
+                String beforeGap = playlist(server);
                 server.write(frame(90000 + 12 * 45000, 12), true);
+                // The epoch republish window is accumulating fresh segments; a
+                // polling receiver must keep receiving the unchanged pre-gap
+                // playlist instead of an error or an empty window.
+                byte[] held = availablePlaylist(server);
+                if (held == null || !beforeGap.equals(new String(held, StandardCharsets.UTF_8))) {
+                    throw new AssertionError("epoch republish gap starved the polling receiver");
+                }
                 populate(server, 13, 12, 90000);
                 String body = playlist(server);
                 if (!body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1")
@@ -416,19 +425,28 @@ public class HlsRegression {
                 }
             } finally { server.stop(); }
         });
-        cases.put("stale cached playlist is never returned as a live edge", () -> {
+        cases.put("stale playlist serves unchanged within grace and is refused beyond grace", () -> {
             DlnaHttpServer server = server();
             try {
                 populate(server, 0, 12, 90000);
+                String before = playlist(server);
                 java.lang.reflect.Field storeField = DlnaHttpServer.class.getDeclaredField("hls");
                 storeField.setAccessible(true);
                 Object store = storeField.get(server);
                 java.lang.reflect.Field completedField = store.getClass().getDeclaredField("lastCompletedNanos");
                 completedField.setAccessible(true);
+                // A sender-side stall must not starve the polling receiver: the
+                // unchanged playlist stays available well past one segment.
                 completedField.setLong(store, clocks.get(server).get() - 3_000_000_000L);
                 java.lang.reflect.Method await = store.getClass().getDeclaredMethod("awaitPlaylist", long.class);
                 await.setAccessible(true);
+                byte[] held = (byte[])await.invoke(store, 0L);
+                if (held == null || !before.equals(new String(held, StandardCharsets.UTF_8))) {
+                    throw new AssertionError("brief stall did not keep the unchanged playlist available");
+                }
+                completedField.setLong(store, clocks.get(server).get() - 13_000_000_000L);
                 if (await.invoke(store, 0L) != null) throw new AssertionError("stale live playlist returned");
+                completedField.setLong(store, clocks.get(server).get());
                 populate(server, 12, 2, 90000);
                 playlist(server);
             } finally { server.stop(); }
@@ -461,9 +479,9 @@ public class HlsRegression {
             try {
                 populateLarge(server, 0, 9);
                 List<String> paths = segmentPaths(playlist(server));
-                for (int index = 0; index < 4; index++) clients.add(slowRequest(server, paths.get(index)));
+                for (int index = 0; index < 4; index++) clients.add(slowRequest(server, paths.get(index % paths.size())));
                 for (Socket client : clients) servingSocket(server, client);
-                Response busy = request(server, "HEAD", paths.get(4), "");
+                Response busy = request(server, "HEAD", paths.get(2), "");
                 if (!busy.headers.startsWith("HTTP/1.1 503") || busy.body.length != 0
                         || !busy.headers.contains("Retry-After: 1")) {
                     throw new AssertionError("fifth HLS response was not bounded: " + busy.headers);

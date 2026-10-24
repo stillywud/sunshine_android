@@ -499,6 +499,47 @@ public class PlaybackMonitorRegression {
                 check(!tracker.sample(wall, "PLAYING", 110000, ""), "unknown ownership cannot recover");
             }
         });
+        cases.put("recovery-query-variant-uri-still-matches-expected-stream", () -> {
+            Tracker tracker = new Tracker();
+            tracker.warm(0, 100000);
+            // A varied-URL recovery re-push may be reported back by the
+            // receiver with or without the extra recovery parameter; both are
+            // the same stream and must not latch foreign media. Positions
+            // stall two seconds behind the learned offset to raise a deficit.
+            check(!tracker.sample(12000, "PLAYING", 110000, EXPECTED + "&r=1"),
+                    "recovery variant must match the expected stream");
+            check(tracker.sample(14000, "PLAYING", 110000, EXPECTED),
+                    "recovery fires while the receiver reports a variant");
+            Tracker stranger = new Tracker();
+            stranger.warm(0, 100000);
+            check(!stranger.sample(12000, "PLAYING", 110000, "http://sender.invalid/other/live.m3u8"),
+                    "different path is foreign");
+            check(!stranger.sample(14000, "PLAYING", 110000, "http://sender.invalid/other/live.m3u8"),
+                    "foreign deficit sample one");
+            check(!stranger.sample(16000, "PLAYING", 110000, "http://sender.invalid/other/live.m3u8"),
+                    "foreign content never recovers");
+        });
+        cases.put("updateExpectedUrl-redirects-acceptance-to-recovered-stream", () -> {
+            Class<?> type = requiredClass(MONITOR + "$DriftTracker");
+            Constructor<?> constructor = type.getDeclaredConstructor(String.class);
+            constructor.setAccessible(true);
+            Object target = constructor.newInstance(EXPECTED);
+            Method observe = type.getDeclaredMethod("observe", long.class, String.class, long.class, String.class);
+            observe.setAccessible(true);
+            Method update = type.getDeclaredMethod("updateExpectedUrl", String.class);
+            update.setAccessible(true);
+            String varied = EXPECTED + "&r=3";
+            update.invoke(target, varied);
+            check(!(Boolean)observe.invoke(target, 0L, "PLAYING", 100000L, varied), "warm one");
+            check(!(Boolean)observe.invoke(target, 2000L, "PLAYING", 102000L, EXPECTED), "warm two accepts prior URI");
+            check(!(Boolean)observe.invoke(target, 4000L, "PLAYING", 104000L, varied), "warm three");
+            check(!(Boolean)observe.invoke(target, 6000L, "PLAYING", 106000L, EXPECTED), "warm four");
+            check(!(Boolean)observe.invoke(target, 8000L, "PLAYING", 108000L, varied), "warm five");
+            check(!(Boolean)observe.invoke(target, 10000L, "PLAYING", 110000L, varied), "warm six stabilises");
+            check(!(Boolean)observe.invoke(target, 12000L, "PLAYING", 110000L, EXPECTED), "deficit sample one");
+            check((Boolean)observe.invoke(target, 14000L, "PLAYING", 110000L, varied),
+                    "recovery fires against the updated expectation");
+        });
     }
 
     static class Running implements AutoCloseable {

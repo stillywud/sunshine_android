@@ -18,6 +18,7 @@ import android.view.WindowManager;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * DLNA 投屏的媒体管线：采集 -> 编码 -> 封装 TS -> HTTP 提供给接收端。
@@ -61,6 +62,12 @@ public class DlnaStreamer {
     private DlnaUpnp.Renderer target;
     private String mediaUrl;
     private boolean lowLatency;
+    /** 当前推送给接收端的地址（含变体查询参数）；漂移恢复时递增。 */
+    private volatile String livePushUrl;
+    private final AtomicInteger liveRepush = new AtomicInteger();
+    /** 流稳定后用于回到直播边缘的一次性重推线程。 */
+    private volatile Thread startupRepusher;
+    private static final long STARTUP_REPUSH_DELAY_MS = 20_000;
 
     /** 音频采集（可选）。null 或未运行时表示纯视频投屏。 */
     private DlnaAudioCapture audioCapture;
@@ -303,18 +310,57 @@ public class DlnaStreamer {
                 if (stopping.get() || !running.get()) {
                     return "投屏已停止";
                 }
+                liveRepush.set(0);
+                livePushUrl = mediaUrl;
                 pushed = DlnaUpnp.play(renderer, mediaUrl, mimeType);
                 if (pushed && lowLatency && !stopping.get()) {
-                    String pushedUrl = mediaUrl;
-                    playbackMonitor = new DlnaPlaybackMonitor(renderer, pushedUrl, () -> {
+                    // 接收端从流开头跟随会持续累积内部缓冲(实测约 6.5 秒);
+                    // 从直播边缘中途加入则稳定在窗口加准备开销(约 3.2 秒)。
+                    // 流稳定后自动变体重推一次,让接收端回到直播边缘。
+                    Thread repusher = new Thread(() -> {
+                        try {
+                            Thread.sleep(STARTUP_REPUSH_DELAY_MS);
+                        } catch (InterruptedException interrupted) {
+                            return;
+                        }
                         synchronized (transportLock) {
-                            if (stopping.get() || !running.get() || target != renderer
-                                    || !pushedUrl.equals(mediaUrl)) {
+                            if (stopping.get() || !running.get() || target != renderer) {
                                 return;
                             }
-                            Log.w(TAG, "Receiver playback fell behind; rejoining live HLS via AVTransport");
-                            if (!DlnaUpnp.play(renderer, pushedUrl, mimeType)) {
-                                Log.w(TAG, "AVTransport live recovery failed");
+                            String varied = mediaUrl + "?r=" + liveRepush.incrementAndGet();
+                            Log.i(TAG, "启动滞后纠正;变体重推回到直播边缘: " + varied);
+                            if (DlnaUpnp.play(renderer, varied, mimeType)) {
+                                livePushUrl = varied;
+                                DlnaPlaybackMonitor monitor = playbackMonitor;
+                                if (monitor != null) {
+                                    monitor.updateExpectedUrl(varied);
+                                }
+                            } else {
+                                Log.w(TAG, "启动滞后纠正重推失败");
+                            }
+                        }
+                    }, "DlnaStartupRepush");
+                    repusher.setDaemon(true);
+                    startupRepusher = repusher;
+                    repusher.start();
+                    playbackMonitor = new DlnaPlaybackMonitor(renderer, mediaUrl, () -> {
+                        synchronized (transportLock) {
+                            if (stopping.get() || !running.get() || target != renderer) {
+                                return;
+                            }
+                            // 同一地址重复 SetAVTransportURI 会被接收端忽略,
+                            // 滞后会一直累积直到接收端自行报错。附加变体查询
+                            // 参数让接收端把它当作新媒体,在当前直播边缘重载。
+                            String varied = mediaUrl + "?r=" + liveRepush.incrementAndGet();
+                            Log.w(TAG, "接收端播放落后;变体重推以回到直播边缘: " + varied);
+                            if (DlnaUpnp.play(renderer, varied, mimeType)) {
+                                livePushUrl = varied;
+                                DlnaPlaybackMonitor monitor = playbackMonitor;
+                                if (monitor != null) {
+                                    monitor.updateExpectedUrl(varied);
+                                }
+                            } else {
+                                Log.w(TAG, "AVTransport 变体重推失败");
                             }
                         }
                     });
@@ -376,6 +422,11 @@ public class DlnaStreamer {
         playbackMonitor = null;
         if (monitor != null) {
             monitor.stop();
+        }
+        Thread repusher = startupRepusher;
+        startupRepusher = null;
+        if (repusher != null) {
+            repusher.interrupt();
         }
         DlnaVideoSource source = videoSource;
         videoSource = null;
