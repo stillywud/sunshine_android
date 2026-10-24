@@ -48,6 +48,14 @@ public class MuxRegression {
         }
         if (!foundPcr) throw new AssertionError("PMT declares video PCR PID but no PCR is present");
         byte[] p = pes.toByteArray();
+        long videoPts = (((p[9] >> 1) & 7L) << 30) | ((p[10] & 255L) << 22)
+            | (((p[11] >> 1) & 127L) << 15) | ((p[12] & 255L) << 7)
+            | ((p[13] >> 1) & 127L);
+        // PCR must share the media clock: a wall-clock PCR drifts away from PTS
+        // on every encoder stall and the 1.2.8 receiver player chases it with
+        // visible skips until its 30s loading timeout.
+        if (Math.abs(previousPcr - videoPts) > 90)
+            throw new AssertionError("PCR " + previousPcr + " is not media-aligned with PTS " + videoPts);
         int payload = 9 + (p[8] & 255);
         byte[] aud = {0,0,0,1,9,(byte)0xf0};
         if (!Arrays.equals(aud, Arrays.copyOfRange(p, payload, payload+6)))

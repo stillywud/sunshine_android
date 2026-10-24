@@ -118,16 +118,25 @@ public class DlnaTsMuxer {
         packet[3] = (byte) (0x20 | ((continuity[PID_VIDEO] + 15) & 15));
         packet[4] = (byte) 183;
         packet[5] = 0x10;
-        writePcr(packet);
+        // 无帧可写时,按上次 PCR 加实际流逝增量推进(媒体时间与墙钟此时一致)。
+        long now = System.nanoTime();
+        long base = lastPcrBase >= 0
+                ? lastPcrBase + (now - lastPcrNs) * PTS_CLOCK / 1_000_000_000L
+                : PTS_START_US * PTS_CLOCK / 1_000_000L;
+        writePcr(packet, base);
         return packet;
     }
 
-    private void writePcr(byte[] packet) {
-        long now = System.nanoTime();
-        long clockUs = now / 1000L - epochUs + PTS_START_US;
-        long base = Math.max(lastPcrBase + 1, clockUs * PTS_CLOCK / 1_000_000L);
+    /**
+     * 写 PCR。base 必须与 PTS 同源(媒体时钟),这是 1.2.8 接收端能起播的关键:
+     * 播放器以 PCR 为系统时钟,而帧按 PTS 呈现。此前 PCR 取墙钟,编码器每次
+     * 停顿都会让 PTS 永久落后 PCR,失配随时间累积——播放器表现为周期性跳帧,
+     * 最终 30 秒加载超时。
+     */
+    private void writePcr(byte[] packet, long base) {
+        base = Math.max(lastPcrBase + 1, base);
         lastPcrBase = base;
-        lastPcrNs = now;
+        lastPcrNs = System.nanoTime();
         base &= 0x1FFFFFFFFL;
         packet[6] = (byte) (base >>> 25);
         packet[7] = (byte) (base >>> 17);
@@ -548,7 +557,7 @@ public class DlnaTsMuxer {
                         packet[i] = (byte) 0xFF;
                     }
                     if (withPcr) {
-                        writePcr(packet);
+                        writePcr(packet, pcrBase);
                     }
                 }
                 System.arraycopy(data, offset, packet,
