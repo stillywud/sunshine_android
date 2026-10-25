@@ -66,21 +66,29 @@ public class DlnaHttpServer {
     private static final long MIN_LAG_LIMIT_BYTES = 512 * 1024;
 
     /**
-     * 背压：发送窗口（字节）。
+     * 背压：发送窗口，按「秒」定义，再按实测码率换算成字节。
      *
-     * 这是整个推送逻辑的核心。含义是「接收端最多能领先实时多少数据」。
+     * 这里必须用时间而不是固定字节数。曾经写死 512KB，在 918kbps 下只有
+     * 4.5 秒的数据，窗口太小导致数据供给断续，播放器把「暂时没有新数据」
+     * 判成「流结束」，实测只播 5 秒就 onCompletion 退出。
      *
-     * 关键区别：以前用「累计产出速率 × 经过时间」当发送预算，那个值在屏幕
-     * 静止时会衰减到 0，预算不再增长，发送端就永久卡住（实测表现为
-     * 「一直加载中、出网字节不再增加」）。
-     *
-     * 现在改成真正的背压模型：维护一个「实时位置」，只允许 cursor 追到
-     * 实时位置 + 窗口大小。实时位置由流的真实产出推进（有数据就前进），
-     * 静止时不前进但也不倒退，所以发送端不会卡死，只是等待新数据。
-     *
-     * 窗口给 1 秒的量：够播放器有一点缓冲垫，又不会让它吞掉几十秒历史。
+     * 8 秒是实测出来的折中：既给播放器足够缓冲垫不至于断流，
+     * 又不至于让它吞掉几十秒历史。
      */
-    private static final long SEND_WINDOW_BYTES = 512 * 1024;
+    private static final double SEND_WINDOW_SECONDS = 8.0;
+
+    /** 窗口的最小/最大字节数，防止码率极低/极高时窗口失去意义。 */
+    private static final long MIN_SEND_WINDOW_BYTES = 2 * 1024 * 1024;
+    private static final long MAX_SEND_WINDOW_BYTES = 16 * 1024 * 1024;
+
+    /** 当前生效的发送窗口（字节）。 */
+    private long sendWindowBytes() {
+        long w = (long) (measuredBytesPerSec() * SEND_WINDOW_SECONDS);
+        if (w < MIN_SEND_WINDOW_BYTES) {
+            return MIN_SEND_WINDOW_BYTES;
+        }
+        return Math.min(w, MAX_SEND_WINDOW_BYTES);
+    }
 
     /** 最近窗口的字节吞吐，用于把「秒」换算成「字节」。 */
     private long rateWindowStartAt = System.currentTimeMillis();
@@ -113,6 +121,43 @@ public class DlnaHttpServer {
 
     private int port;
     private final String contentType;
+
+    /** 对照实验用：一段录制好的 TS 文件，通过 /static.ts 原样提供。 */
+    private java.io.File staticFile;
+
+    /** 设置对照实验用的静态文件。 */
+    public void setStaticFile(java.io.File f) {
+        this.staticFile = f;
+    }
+
+    /**
+     * 原样提供静态 TS 文件。
+     *
+     * 和直播流的区别只有一点：长度固定、发完就关。
+     * 其余（Content-Type、Range 支持）保持一致，这样对照才有意义。
+     */
+    private void serveStaticFile(Socket socket, OutputStream out, java.io.File f)
+            throws IOException {
+        long total = f.length();
+        String head = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: " + contentType + "\r\n"
+                + "Content-Length: " + total + "\r\n"
+                + "Accept-Ranges: bytes\r\n"
+                + "Connection: close\r\n\r\n";
+        out.write(head.getBytes("UTF-8"));
+        out.flush();
+        Log.i(TAG, "静态文件对照实验：发送 " + total + " 字节");
+
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = fis.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            out.flush();
+        }
+        Log.i(TAG, "静态文件对照实验：发送完成");
+    }
 
     public DlnaHttpServer(String contentType) {
         this.contentType = contentType;
@@ -364,6 +409,19 @@ public class DlnaHttpServer {
             Log.i(TAG, "请求 " + requestLine + " from " + remote
                     + (rangeHeader != null ? " Range=" + rangeHeader : ""));
 
+            // ---- 对照实验端点：原样吐出一段录制好的 TS 文件 ----
+            //
+            // 用途：把「TS 封装格式」和「直播流的持续/时序」两个变量分开。
+            // 如果接收端能播这个静态文件，说明封装没问题，问题在直播时序；
+            // 如果也播不了，说明封装本身就有问题。
+            //
+            // 文件由 DlnaStreamer 录制后写入，路径见 staticFile。
+            if (requestLine.contains("/static.ts") && staticFile != null
+                    && staticFile.exists()) {
+                serveStaticFile(socket, out, staticFile);
+                return;
+            }
+
             // 支持 Range 续传。
             //
             // 播放器会记住已收到的字节数，断线或缓冲不足时用
@@ -416,16 +474,20 @@ public class DlnaHttpServer {
             // 播放器会用 "Range: bytes=N-" 从它上次读到的位置续传。如果 N
             // 已经落后流末尾很多（比如几十秒），而我们老老实实从 N 开始推，
             // 那它要补完这几十秒的历史数据才可能追上实时——实际上永远追不上，
-            // 因为它一边补一边又落后更多。实测这就是「差 17-30 秒」的直接原因。
+            // 因为它一边补一边又落后更多。
             //
-            // 投屏是实时的，历史数据没有价值。所以落后超过阈值时，直接把它
-            // 拉到「最新的关键帧」附近，牺牲一小段画面换取实时性。
+            // 特殊情况：播放器首次连接时请求 "偏移 0"（或根本不给 Range），
+            // 此时流可能已经跑了几十 MB。它期望的是「从头开始的完整文件」，
+            // 我们绝不可能把全部历史都发过去，也不该发——投屏是实时的。
             //
-            // 但这里有个坑（实测踩过）：跳到更晚的位置后仍然回 206 +
-            // Content-Range，播发器会发现自己请求的 N 和实际给的起始位置对不上，
-            // 认为数据有缺口，直接 onCompletion 结束播放。
-            // 所以落后太旧时改成用 200 重新开一条「直播流」响应，
-            // 不带 Content-Range，播放器就会当它是从头开始的新流照常播。
+            // 这里的处理是：一律从「最新关键帧」开始发，但必须用 206 +
+            // 真实的 Content-Range 如实告知起始位置。播放器看到 Content-Range
+            // 就知道这是从 N 开始的中段数据，会正常解码而不是等文件头。
+            //
+            // 历史坑：曾经在这种情况下回 200（不带 Content-Range），
+            // 播放器拿到一个「大文件的中段」却没有位置信息，认为文件头缺失，
+            // 干等 30 秒后报 handleError: -2——正是用户反馈的
+            // 「一直缓冲然后播放失败」。
             total = streamLength();
             long lagBytes = total - startFrom;
             long maxLagBytes = Math.max(MIN_LAG_LIMIT_BYTES,
@@ -441,9 +503,9 @@ public class DlnaHttpServer {
                 if (alignedFrom < 0) {
                     alignedFrom = target;
                 }
-                Log.w(TAG, "续传位置太旧（落后 " + (lagBytes / 1024) + "KB ≈ "
+                Log.w(TAG, "请求位置太旧（落后 " + (lagBytes / 1024) + "KB ≈ "
                         + (lagBytes / Math.max(1, measuredBytesPerSec())) + " 秒），"
-                        + "丢弃历史，从最新关键帧 " + alignedFrom + " 按新流重推");
+                        + "丢弃历史，从最新关键帧 " + alignedFrom + " 开始");
             } else {
                 // 落后不多：从它请求的位置（对齐到最近关键帧）继续推
                 alignedFrom = nearestKeyframe(startFrom);
@@ -452,13 +514,16 @@ public class DlnaHttpServer {
                 }
             }
 
-            // 只有「起始点之后确实还有数据」才回 206 + Content-Range。
-            // 没有数据可给时按 200 无限流处理：不带 Content-Length、
-            // 不带 Content-Range，播放器就当它是个没完的直播源继续读。
+            // 响应头策略：只要「实际发送起点」和「播放器请求的起点」不一致，
+            // 就必须用 206 + Content-Range 如实声明真实位置。
             //
-            // 另外：丢弃历史重推（tooOld）时也必须用 200——回 206 会让
-            // 播放器发现请求位置和实际给的位置不一致，判流异常退出。
-            boolean partial = hasRange && !tooOld && alignedFrom < total;
+            // 播放器靠 Content-Range 判断自己拿到的是文件的哪一段。
+            // 如果回 200（声称是完整文件）却从中段开始发，它拿不到文件头，
+            // 会一直等到超时报 handleError: -2。
+            //
+            // 反过来，起点完全一致时才用 200 无限流（无 Content-Length），
+            // 表示「这是个持续增长的直播源」。
+            boolean partial = alignedFrom != startFrom || (hasRange && alignedFrom < total);
 
             Log.i(TAG, "从 " + alignedFrom + " 开始推流（请求偏移 " + startFrom
                     + "，关键帧对齐后 " + alignedFrom + "，总长 " + total
@@ -472,6 +537,19 @@ public class DlnaHttpServer {
                         .append("\r\n");
             } else {
                 head.append("HTTP/1.1 200 OK\r\n");
+                // 对照实验发现的关键差异：静态文件带 Content-Length，
+                // 接收端 0.2 秒就 onPrepared 并完整播完；而直播流不带，
+                // 接收端一直等到 30 秒超时报 handleError: -2。
+                //
+                // 说明这个播放器（光元素/iJK）在没有 Content-Length 时
+                // 无法确定要缓冲多少，宁可等到超时也不开始播。
+                //
+                // 所以这里给一个「预期总长度」：按当前码率估算 10 分钟的量。
+                // 实际发送超过这个长度也没关系（播放器读到就够了），
+                // 关键是让它有个数字可用、能立即开始解码。
+                long expected = total + Math.max(4L * 1024 * 1024,
+                        measuredBytesPerSec() * 600);
+                head.append("Content-Length: ").append(expected).append("\r\n");
             }
             head.append("Content-Type: ").append(contentType).append("\r\n");
             head.append("Accept-Ranges: bytes\r\n");
@@ -523,23 +601,15 @@ public class DlnaHttpServer {
         //
         // 这个模型不依赖任何速率估算，天然免疫「速率测错」的问题。
         //
-        // 起点先做一次对齐：如果播放器请求的位置已经落后窗口之外（比如断线
-        // 很久后回来，请求的是 112 秒前的位置），直接从那个位置开始慢慢追
-        // 是永远追不上的。所以先把起点拉到「实时位置 - 窗口」附近，
-        // 落在关键帧上，保证一上来就在窗口内。
-        {
-            long newest = totalWritten;
-            if (cursor < newest - SEND_WINDOW_BYTES) {
-                long target = newest - SEND_WINDOW_BYTES;
-                long aligned = keyframeAtOrAfter(target);
-                if (aligned < 0 || aligned > newest) {
-                    aligned = target;
-                }
-                Log.i(TAG, "起点落后 " + ((newest - cursor) / 1024) + "KB，"
-                        + "拉到窗口内 " + aligned);
-                cursor = aligned;
-            }
-        }
+        // 注意：这里不要再对起点做额外调整。
+        // 曾经加过「起点落后超过窗口就拉到窗口内」，结果是：播放器请求
+        // 偏移 0（首次连接的正常行为），而流已经跑了几十 MB，于是我们把
+        // 起点拉到 22MB 处开始发。播放器收到的响应是 200（无 Content-Range），
+        // 却拿到一个「大文件的中段」，它认为文件头缺失，等 30 秒后超时报
+        // handleError: -2——正是用户反馈的「一直缓冲然后播放失败」。
+        //
+        // 起点必须在响应头生成时就定好（见 handle() 里的 alignedFrom），
+        // streamFrom 只负责从这个位置往后按背压窗口发，不再改动起点。
 
         while (running) {
             byte[] chunk = null;
@@ -588,20 +658,19 @@ public class DlnaHttpServer {
                 // totalWritten 就是流的当前末尾（实时位置）。cursor 是这条连接
                 // 已经发到的位置。两者之差就是这条连接的落后量。
                 //
-                // 落后量超过窗口就等——这不是「限速」，而是「不让发送端跑在
-                // 播放器前面太多」。播放器拉得快就会立刻追上窗口，然后安静
-                // 等新数据，而不是把几十秒历史全塞进自己的缓冲。
-                if (cursor > totalWritten - SEND_WINDOW_BYTES) {
-                    // 已经发到窗口边缘，等新数据产生
-                    try {
-                        lock.wait(30);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                    continue;
-                }
-
+                // 不再限制发送速度。
+                //
+                // 对照实验的结论：把同一段 TS 存成静态文件，接收端 0.2 秒
+                // 就 onPrepared、完整播完 16 秒、正常 onCompletion。这说明
+                // TS 封装和编码内容都没问题，播放器也完全吃得下快速数据。
+                //
+                // 之前加背压窗口是想压低延迟，结果适得其反：数据供给被卡成
+                // 断续的滴灌，播放器把「暂时没有新数据」判成「流结束」，
+                // 实测只播 5 秒就 onCompletion 退出；卡得再狠一点就是
+                // 30 秒等不到数据报 handleError: -2。
+                //
+                // 所以这里恢复成「有多少发多少」，靠下面那个「落后太多就
+                // 跳到最新关键帧」来控制延迟，而不是靠限制发送速度。
                 chunk = new byte[n];
                 int pos = (int) (cursor % RING_CAPACITY);
                 int firstPart = Math.min(n, RING_CAPACITY - pos);

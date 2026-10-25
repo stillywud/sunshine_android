@@ -44,14 +44,19 @@ public class DlnaStreamer {
      * 实测 60fps 时端到端延迟约 20 秒，25fps 时约 1 秒。
      * 要 60fps 又低延迟，得能控制接收端缓冲深度——DLNA 协议没有这个能力。
      *
-     * 码率 3Mbps：720p25 下这个量级足够保画质，局域网毫无压力。
+     * 分辨率 960x540：这是实测在模拟器上能稳定出帧的档位。
+     * 提到 720p 后编码器在模拟器上只能跑约 11fps、码率上不去，
+     * 接收端等不到足够数据就 30 秒超时报 handleError: -2。
+     * 真机编码能力更强，但先用模拟器能跑通的档位做基线。
+     *
+     * 码率 2Mbps：540p25 下足够保画质，局域网毫无压力。
      *
      * I 帧间隔 2 秒：每秒一个关键帧会显著抬高平均码率。
      */
-    private static final int WIDTH = 1280;
-    private static final int HEIGHT = 720;
+    private static final int WIDTH = 960;
+    private static final int HEIGHT = 540;
     private static final int FPS = 25;
-    private static final int BITRATE = 3_000_000;
+    private static final int BITRATE = 2_000_000;
     private static final int I_FRAME_INTERVAL = 2; // 秒
     private static final String MIME_TS = "video/mp2t";
 
@@ -198,6 +203,15 @@ public class DlnaStreamer {
             format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL);
 
+            // 实时优先：告诉编码器这是投屏直播流，宁可降画质/丢帧也不要积压。
+            // 不加这两个参数时，模拟器编码器实测只跑到 12fps / 620kbps
+            // （配置是 25fps / 2Mbps），接收端等不到足够数据就一直缓冲，
+            // 30 秒后报 handleError: -2。
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 = 实时
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                format.setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 1);
+            }
+
             // 屏幕内容静止时，Surface 上没有新帧，编码器就彻底停止出帧。
             // 此时 HTTP 流不再增长，接收端缓冲耗尽后报 "handleError: -2" 断开
             // （实测：不设这个参数时，屏幕静止下视频只产出 1 帧/秒）。
@@ -223,6 +237,13 @@ public class DlnaStreamer {
             int[] size = screenSize();
             muxer = new DlnaTsMuxer(FPS, false, DlnaAudioCapture.SAMPLE_RATE);
             httpServer = new DlnaHttpServer(MIME_TS);
+            // 对照实验用：如果应用私有目录里放了录好的 TS，就通过 /static.ts 提供
+            java.io.File probe = new java.io.File(context.getFilesDir(), "static.ts");
+            if (probe.exists()) {
+                httpServer.setStaticFile(probe);
+                Log.i(TAG, "静态对照文件已注册: " + probe.getAbsolutePath()
+                        + " (" + probe.length() + " 字节)");
+            }
             int port = httpServer.start(0);
 
             String ip = localIpAddress();
