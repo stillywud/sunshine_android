@@ -93,18 +93,14 @@ public class DlnaHttpServer {
     /**
      * 直播流声明的「虚拟总长度」。
      *
-     * 这个值只用于让播放器能立即开始解码（它需要 Content-Length 才肯播）。
-     * 播放器读满这么多字节就会认为文件结束并退出播放，所以要给得足够大。
+     * 这个值不是提示，而是播放器认为的流总长度——读满就判文件结束退出。
+     * 所以既要足够大，又不能溢出。实测 4GB 会触发 handleError: 0x20030003
+     * （32 位有符号整数溢出），说明上限是 2^31-1。
      *
-     * 实测出的可用区间：
-     *   - 不带 Content-Length → 30 秒超时报 handleError: -2，永不开始播
-     *   - 190MB（按码率估 10 分钟）→ 能播，但播满 190MB 就 onCompletion 断开
-     *   - 4GB / 2TB → 播放器直接报 537067523（数值被拒），完全不播
-     *
-     * 所以上限落在 190MB 和 4GB 之间。取 1GB：约 1 小时 @ 2Mbps，
-     * 足够覆盖一次投屏会话，又远离被拒的阈值。
+     * 取接近但不超过 int 上限的值：约 2GB，按 2Mbps 算能连续播 2.4 小时。
+     * 读满后播放器会带 Range 重连，由续传逻辑无缝接上。
      */
-    private static final long FAKE_STREAM_LENGTH = 1024L * 1024 * 1024;
+    private static final long FAKE_STREAM_LENGTH = Integer.MAX_VALUE;
 
     /** 最近窗口的字节吞吐，用于把「秒」换算成「字节」。 */
     private long rateWindowStartAt = System.currentTimeMillis();
@@ -463,6 +459,15 @@ public class DlnaHttpServer {
 
             long total = streamLength();
             if (startFrom > total) {
+                // 播放器读满了我们声明的虚拟长度（FAKE_STREAM_LENGTH）之后，
+                // 会带着 "Range: bytes=<虚拟长度>-" 重连请求。那个偏移在真实
+                // 流里根本不存在，必须夹到当前真实末尾，然后从那里继续发。
+                //
+                // 这里要记住「它请求的是一个不存在的远期位置」，下面响应头
+                // 会据此用 200 而不是 206（否则播放器看到 Content-Range 里
+                // 的起始位置和它请求的对不上，会判数据缺口退出）。
+                Log.i(TAG, "请求偏移 " + startFrom + " 超出真实长度 " + total
+                        + "（播放器读满了虚拟长度），从当前末尾继续");
                 startFrom = total;
             }
 
@@ -541,6 +546,9 @@ public class DlnaHttpServer {
             // 表示「这是个持续增长的直播源」。
             boolean partial = alignedFrom != startFrom || (hasRange && alignedFrom < total);
 
+            /** 是否使用 chunked 传输编码（无固定长度，永不因「读满」而结束） */
+            boolean useChunked = false;
+
             Log.i(TAG, "从 " + alignedFrom + " 开始推流（请求偏移 " + startFrom
                     + "，关键帧对齐后 " + alignedFrom + "，总长 " + total
                     + (partial ? "，206" : "，200 直播流") + "）");
@@ -553,21 +561,21 @@ public class DlnaHttpServer {
                         .append("\r\n");
             } else {
                 head.append("HTTP/1.1 200 OK\r\n");
-                // 对照实验发现的关键差异：静态文件带 Content-Length，
-                // 接收端 0.2 秒就 onPrepared 并完整播完；而直播流不带，
-                // 接收端一直等到 30 秒超时报 handleError: -2。
+                // 给一个足够大的虚拟总长度，让播放器能立即开始解码。
                 //
-                // 说明这个播放器（光元素/iJK）没有 Content-Length 就无法
-                // 确定缓冲策略，宁可等到超时也不开始播。
+                // 这个值不是提示，而是播放器认为的「流总长度」——读满就
+                // 判文件结束、onCompletion 退出。所以既要足够大，又不能
+                // 大到溢出（实测 4GB 会触发 0x20030003）。
                 //
-                // 但这个值是「播放器认为的流总长度」——它读满这么多字节就会
-                // 判定文件结束、触发 onCompletion 退出播放。
+                // 实测边界：
+                //   不带      → 30 秒超时 handleError: -2，永不开始播
+                //   chunked   → 同上（这个播放器的 HTTP 栈不认直播 chunked）
+                //   190MB     → 能播，播满就断开
+                //   1GB       → 能播
+                //   4GB 及以上 → 立即 handleError: 0x20030003（32位溢出）
                 //
-                // 踩过的坑：一开始按码率估算 10 分钟的量（约 190MB），
-                // 结果播了 10 分钟就 onCompletion 断开了。
-                //
-                // 所以这里给一个实际不可能达到的上限（约 2TB）。
-                // 播放器有了数字能立即开播，又永远不会读满而判结束。
+                // 取 1GB（约 1 小时 @ 2Mbps）。读满后播放器会断开并带着
+                // Range 重连，由下面的续传逻辑无缝接上，用户基本无感。
                 head.append("Content-Length: ").append(FAKE_STREAM_LENGTH).append("\r\n");
             }
             head.append("Content-Type: ").append(contentType).append("\r\n");
@@ -582,7 +590,7 @@ public class DlnaHttpServer {
             // 先登记起始位置，避免刚从连接建立到第一块数据写出之间
             // 集合为空导致延迟误报 0
             updateCursor(connId, alignedFrom);
-            streamFrom(out, alignedFrom, connId);
+            streamFrom(out, alignedFrom, connId, useChunked);
         } catch (Exception e) {
             Log.w(TAG, "连接结束 " + remote + ": " + e.getMessage());
         } finally {
@@ -596,7 +604,8 @@ public class DlnaHttpServer {
     }
 
     /** 从指定绝对偏移开始，把环形缓冲区里的数据持续推给客户端。 */
-    private void streamFrom(OutputStream out, long startOffset, int connId) throws IOException {
+    private void streamFrom(OutputStream out, long startOffset, int connId,
+                            boolean useChunked) throws IOException {
         // 对齐到 TS 包边界（188 字节）。播放器从半个包里开始会直接解析失败。
         long cursor = alignToPacket(startOffset);
         long lastWrite = System.currentTimeMillis();
@@ -699,7 +708,15 @@ public class DlnaHttpServer {
                 }
             }
 
-            out.write(chunk);
+            if (useChunked) {
+                // chunked 编码：每块前缀是十六进制的块长度 + CRLF，
+                // 块数据后面再跟 CRLF。
+                out.write((Integer.toHexString(chunk.length) + "\r\n").getBytes("US-ASCII"));
+                out.write(chunk);
+                out.write("\r\n".getBytes("US-ASCII"));
+            } else {
+                out.write(chunk);
+            }
             out.flush();
             cursor += chunk.length;
             servedBytes += chunk.length;
