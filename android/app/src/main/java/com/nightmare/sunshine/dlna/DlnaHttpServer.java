@@ -90,6 +90,22 @@ public class DlnaHttpServer {
         return Math.min(w, MAX_SEND_WINDOW_BYTES);
     }
 
+    /**
+     * 直播流声明的「虚拟总长度」。
+     *
+     * 这个值只用于让播放器能立即开始解码（它需要 Content-Length 才肯播）。
+     * 播放器读满这么多字节就会认为文件结束并退出播放，所以要给得足够大。
+     *
+     * 实测出的可用区间：
+     *   - 不带 Content-Length → 30 秒超时报 handleError: -2，永不开始播
+     *   - 190MB（按码率估 10 分钟）→ 能播，但播满 190MB 就 onCompletion 断开
+     *   - 4GB / 2TB → 播放器直接报 537067523（数值被拒），完全不播
+     *
+     * 所以上限落在 190MB 和 4GB 之间。取 1GB：约 1 小时 @ 2Mbps，
+     * 足够覆盖一次投屏会话，又远离被拒的阈值。
+     */
+    private static final long FAKE_STREAM_LENGTH = 1024L * 1024 * 1024;
+
     /** 最近窗口的字节吞吐，用于把「秒」换算成「字节」。 */
     private long rateWindowStartAt = System.currentTimeMillis();
     private long rateWindowBytes;
@@ -541,15 +557,18 @@ public class DlnaHttpServer {
                 // 接收端 0.2 秒就 onPrepared 并完整播完；而直播流不带，
                 // 接收端一直等到 30 秒超时报 handleError: -2。
                 //
-                // 说明这个播放器（光元素/iJK）在没有 Content-Length 时
-                // 无法确定要缓冲多少，宁可等到超时也不开始播。
+                // 说明这个播放器（光元素/iJK）没有 Content-Length 就无法
+                // 确定缓冲策略，宁可等到超时也不开始播。
                 //
-                // 所以这里给一个「预期总长度」：按当前码率估算 10 分钟的量。
-                // 实际发送超过这个长度也没关系（播放器读到就够了），
-                // 关键是让它有个数字可用、能立即开始解码。
-                long expected = total + Math.max(4L * 1024 * 1024,
-                        measuredBytesPerSec() * 600);
-                head.append("Content-Length: ").append(expected).append("\r\n");
+                // 但这个值是「播放器认为的流总长度」——它读满这么多字节就会
+                // 判定文件结束、触发 onCompletion 退出播放。
+                //
+                // 踩过的坑：一开始按码率估算 10 分钟的量（约 190MB），
+                // 结果播了 10 分钟就 onCompletion 断开了。
+                //
+                // 所以这里给一个实际不可能达到的上限（约 2TB）。
+                // 播放器有了数字能立即开播，又永远不会读满而判结束。
+                head.append("Content-Length: ").append(FAKE_STREAM_LENGTH).append("\r\n");
             }
             head.append("Content-Type: ").append(contentType).append("\r\n");
             head.append("Accept-Ranges: bytes\r\n");
